@@ -39,3 +39,23 @@ func TestSnapshotRestoresRootCookieForAuthAndLogin(t *testing.T) {
 		}
 	}
 }
+
+func TestSnapshotRetainsAccountManagementAndAnnouncementCookies(t *testing.T) {
+	c := NewClient(failedProvider{})
+	c.cachedAnisetteHeaders = map[string]string{}
+	for _, endpoint := range []string{deviceListURL, deviceServiceURL} {
+		u, _ := url.Parse(endpoint)
+		c.cookieJar.SetCookies(u, []*http.Cookie{{Name: "test-management", Value: "test-value", Secure: true}})
+	}
+	sess, err := c.Snapshot("test-account", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := NewClientFromSession(failedProvider{}, sess)
+	for _, endpoint := range []string{deviceListURL, deviceServiceURL} {
+		u, _ := url.Parse(endpoint)
+		if cookies := restored.cookieJar.Cookies(u); len(cookies) != 1 || cookies[0].Value != "test-value" {
+			t.Fatal("account management cookies lost after restart")
+		}
+	}
+}

@@ -122,6 +122,28 @@ func TestNoTwoFactorPersistsOnlyAfterICloudLogin(t *testing.T) {
 	}
 }
 
+func TestCheckpointRequiresAuthenticatedClient(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{results: []*gsa.LoginResult{testResult(false)}}
+	login, err := BeginLogin(Credentials{"owner@example.test", "test-password"}, store, testOptions(backend, testDelegate)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if login.SaveSession() == nil || store.saves != 0 {
+		t.Fatal("checkpoint saved unverified session")
+	}
+	if _, err = login.Client(); err != nil {
+		t.Fatal(err)
+	}
+	if err = login.SaveSession(); err != nil || store.saves != 2 || store.session.AppleID != "owner@example.test" {
+		t.Fatal("active session was not checkpointed")
+	}
+	store.saveErr = errors.New("storage unavailable")
+	if login.SaveSession() == nil {
+		t.Fatal("checkpoint swallowed storage failure")
+	}
+}
+
 func TestCachedSessionMustAuthenticateAndMatchAccount(t *testing.T) {
 	for _, account := range []string{"OWNER@example.test", "other@example.test", ""} {
 		t.Run(account, func(t *testing.T) {

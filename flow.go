@@ -268,6 +268,24 @@ func (l *Login) Client() (*Client, error) {
 	return l.client, nil
 }
 
+// SaveSession checkpoints refreshed cookies for an already authenticated login.
+// Service tokens and account credentials remain in memory.
+func (l *Login) SaveSession() error {
+	if l.client == nil || l.needsTwoFactor {
+		return errors.New("appleservices: complete authentication before saving the session")
+	}
+	gsess, err := l.backend.Snapshot(l.adsid, nil)
+	if err != nil {
+		return fmt.Errorf("appleservices: snapshot session: %w", err)
+	}
+	sess := fromGSASession(gsess)
+	sess.AppleID = l.creds.AppleID
+	if err := l.store.SaveSession(&sess); err != nil {
+		return fmt.Errorf("appleservices: save session: %w", err)
+	}
+	return nil
+}
+
 func toGSASession(s Session) gsa.Session {
 	cookies := map[string][]gsa.CookieKV{}
 	for _, c := range s.Cookies {

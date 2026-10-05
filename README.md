@@ -161,9 +161,27 @@ OpenBubbles 1.18.800.0 Windows 模块。此机器已有对应 Store 包缓存，
 登录后输入 `code` 可主动显示本机生成的六位码；收到登录请求时可输入 `allow` 或 `deny`。
 发送一次测试登录请求可能也会通知账号原有的 iPhone。这个通知与首次短信验证是两个不同的步骤。
 
-本机生成码的真实登录验收已通过。Apple 网页是否把它显示为独立新增设备、
-网页里的受信任标记，以及 `allow` 按钮流程仍未完成验收；本次测试的推送随后被取消，
-使用手动 `code` 完成验证。依赖和精确验证边界见 [实现记录](docs/trusted-device.md)。
+本机生成码的真实登录验收已通过。用户随后提供的 Apple 官网截图明确显示
+`appleservices` 为可接收验证码的受信任设备。`allow` 按钮流程仍未完成验收，
+此前使用手动 `code` 完成验证。依赖和精确验证边界见 [实现记录](docs/trusted-device.md)。
+
+保持登录及推送在线：
+
+```powershell
+.\run-trusted-device.ps1 -Background
+.\run-trusted-device.ps1 -Status
+# 主动停止时：
+.\run-trusted-device.ps1 -Stop
+```
+
+后台每 10 分钟重新认证、续报设备并拉取设备列表，保存刷新的 Cookie。
+首次短信验证需在前台完成。后台无自动退出时长，关闭终端输入仍继续运行，
+不会自动批准请求或把生成码写入日志。Windows 注销/重启后需重新启动。
+在线状态记录在 `state/runtime.json`，不包含账号、密码、Cookie 或令牌。
+前台输入 `devices` 可重新查询设备数量与当前安装是否可见。
+
+本项目使用自己的登录状态文件；Windows 官方 iCloud 客户端使用它自己的认证状态。
+保持本项目在线不等于完成官方客户端的“验证你的 Apple 账户”。
 
 原始源码保存在 Git 的初始提交 `d6fb108`，也有 `backups/original-source.zip` 备份。
 

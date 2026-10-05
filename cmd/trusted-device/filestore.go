@@ -34,11 +34,7 @@ func (s fileStore) SaveDevice(dev *appleservices.Device) error {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return err
 	}
-	data, err := json.Marshal(dev)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.devicePath(), data, 0o600)
+	return writeJSONFile(s.devicePath(), dev)
 }
 
 func (s fileStore) LoadSession() (*appleservices.Session, error) {
@@ -66,9 +62,5 @@ func (s fileStore) SaveSession(sess *appleservices.Session) error {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return err
 	}
-	data, err := json.Marshal(sess)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.sessionPath(), data, 0o600)
+	return writeJSONFile(s.sessionPath(), sess)
 }
