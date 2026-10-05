@@ -30,6 +30,7 @@ type Device struct {
 }
 
 type Session struct {
+	AppleID string
 	DSID    string
 	Cookies []Cookie
 }
@@ -48,12 +49,21 @@ type Credentials struct {
 type Option func(*options)
 
 type options struct {
-	anisette   gsa.AnisetteProvider
-	newBackend backendFactory
+	anisette      gsa.AnisetteProvider
+	newBackend    backendFactory
+	fetchDelegate delegateFetcher
+	servers       []string
 }
 
 func WithAnisette(p gsa.AnisetteProvider) Option {
 	return func(o *options) {
 		o.anisette = p
+	}
+}
+
+// WithAnisetteServers uses the supplied anisette servers instead of the public pool.
+func WithAnisetteServers(urls ...string) Option {
+	return func(o *options) {
+		o.servers = append([]string{}, urls...)
 	}
 }

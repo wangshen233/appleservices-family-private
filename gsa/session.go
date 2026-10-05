@@ -21,6 +21,7 @@ type Session struct {
 
 func (c *Client) requestURLs() []string {
 	return []string{
+		gsaBaseURL + "/auth",
 		gsaBaseURL + "/grandslam/GsService2",
 		gsaBaseURL + "/auth/verify/trusteddevice",
 		gsaBaseURL + "/grandslam/GsService2/validate",

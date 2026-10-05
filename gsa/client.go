@@ -42,9 +42,6 @@ func (c *Client) anisetteHeaders() (map[string]string, error) {
 func (c *Client) refreshAnisetteHeaders() (map[string]string, error) {
 	h, err := c.anisette.Headers()
 	if err != nil {
-		if c.cachedAnisetteHeaders != nil {
-			return c.cachedAnisetteHeaders, nil
-		}
 		return nil, fmt.Errorf("gsa: anisette headers: %w", err)
 	}
 	c.cachedAnisetteHeaders = h

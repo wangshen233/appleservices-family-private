@@ -80,7 +80,7 @@ func (c *Client) GetHeaders(s State) (map[string]string, error) {
 	if rinfo == "" {
 		rinfo = "17106176"
 	}
-	return map[string]string{
+	h := map[string]string{
 		"X-Apple-I-MD":          r.MD,
 		"X-Apple-I-MD-M":        r.MDM,
 		"X-Apple-I-MD-RINFO":    rinfo,
@@ -90,5 +90,9 @@ func (c *Client) GetHeaders(s State) (map[string]string, error) {
 		"X-Mme-Device-Id":       s.DeviceID(),
 		"X-Apple-I-Client-Time": time.Now().UTC().Format("2006-01-02T15:04:05Z"),
 		"X-Apple-I-TimeZone":    "GMT",
-	}, nil
+	}
+	if c.userAgent != "" {
+		h["User-Agent"] = c.userAgent
+	}
+	return h, nil
 }
