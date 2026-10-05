@@ -76,16 +76,8 @@ func run(args []string, input io.Reader, output, errOutput io.Writer) error {
 		return err
 	}
 	if login.NeedsTwoFactor() {
-		fmt.Fprintln(errOutput, "Two-factor authentication required; requesting a code ...")
-		if err := login.RequestCode(method); err != nil {
-			return err
-		}
-		fmt.Fprint(errOutput, "Enter the six-digit verification code: ")
-		code, err := bufio.NewReader(input).ReadString('\n')
-		if err != nil && (err != io.EOF || code == "") {
-			return fmt.Errorf("read verification code: %w", err)
-		}
-		if err := login.SubmitCode(method, code); err != nil {
+		fmt.Fprintln(errOutput, "Two-factor authentication required.")
+		if err := completeTwoFactor(login, method, input, errOutput); err != nil {
 			return err
 		}
 	}
@@ -96,6 +88,48 @@ func run(args []string, input io.Reader, output, errOutput io.Writer) error {
 	// Do not print account IDs, credentials, cookies, or tokens.
 	fmt.Fprintln(output, "iCloud login successful. Trusted session saved.")
 	return nil
+}
+
+type twoFactorLogin interface {
+	RequestCode(appleservices.TwoFactorMethod) error
+	SubmitCode(appleservices.TwoFactorMethod, string) error
+}
+
+func completeTwoFactor(login twoFactorLogin, method appleservices.TwoFactorMethod, input io.Reader, output io.Writer) error {
+	request := func() error {
+		if err := login.RequestCode(method); err != nil {
+			return err
+		}
+		if method == appleservices.SMS {
+			fmt.Fprintln(output, "SMS verification code requested.")
+		} else {
+			fmt.Fprintln(output, "Trusted-device verification code requested.")
+		}
+		return nil
+	}
+	if err := request(); err != nil {
+		return err
+	}
+	reader := bufio.NewReader(input)
+	for {
+		fmt.Fprint(output, "Enter six-digit code, or resend / sms / device: ")
+		line, err := reader.ReadString('\n')
+		if err != nil && (err != io.EOF || line == "") {
+			return fmt.Errorf("read verification code: %w", err)
+		}
+		switch strings.TrimSpace(line) {
+		case "resend":
+		case "sms":
+			method = appleservices.SMS
+		case "device":
+			method = appleservices.TrustedDevice
+		default:
+			return login.SubmitCode(method, strings.TrimSpace(line))
+		}
+		if err := request(); err != nil {
+			return err
+		}
+	}
 }
 
 func envOrDefault(name, fallback string) string {

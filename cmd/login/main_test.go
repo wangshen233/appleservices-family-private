@@ -68,3 +68,35 @@ func TestHelpDoesNotExposeEnvironmentCredentials(t *testing.T) {
 		t.Fatal("help exposed environment credentials")
 	}
 }
+
+type fakeTwoFactorLogin struct {
+	requests  []appleservices.TwoFactorMethod
+	submitted appleservices.TwoFactorMethod
+	code      string
+}
+
+func (l *fakeTwoFactorLogin) RequestCode(m appleservices.TwoFactorMethod) error {
+	l.requests = append(l.requests, m)
+	return nil
+}
+func (l *fakeTwoFactorLogin) SubmitCode(m appleservices.TwoFactorMethod, code string) error {
+	l.submitted, l.code = m, code
+	return nil
+}
+
+func TestVerificationResendAndMethodSwitchUseSameLogin(t *testing.T) {
+	l := &fakeTwoFactorLogin{}
+	var output bytes.Buffer
+	if err := completeTwoFactor(l, appleservices.TrustedDevice, strings.NewReader("resend\nsms\n123456\n"), &output); err != nil {
+		t.Fatal(err)
+	}
+	if len(l.requests) != 3 || l.requests[0] != appleservices.TrustedDevice || l.requests[1] != appleservices.TrustedDevice || l.requests[2] != appleservices.SMS {
+		t.Fatal("resend changed method or SMS was not requested")
+	}
+	if l.submitted != appleservices.SMS || l.code != "123456" {
+		t.Fatal("code was not submitted with the selected verification method")
+	}
+	if strings.Contains(output.String(), "123456") {
+		t.Fatal("printed verification code")
+	}
+}
