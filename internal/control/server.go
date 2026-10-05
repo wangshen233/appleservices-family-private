@@ -1,0 +1,162 @@
+// Package control provides authenticated loopback IPC for the local dashboard.
+package control
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+)
+
+type Record struct {
+	PID   int    `json:"pid"`
+	URL   string `json:"url"`
+	Token string `json:"token"`
+}
+type Device struct {
+	Name         string `json:"name"`
+	Model        string `json:"model"`
+	Installation bool   `json:"installation"`
+	Current      bool   `json:"current"`
+	Trusted      *bool  `json:"trusted,omitempty"`
+}
+type Pending struct {
+	ID         string    `json:"id"`
+	ReceivedAt time.Time `json:"received_at"`
+}
+type View struct {
+	Status    json.RawMessage `json:"status"`
+	Devices   []Device        `json:"devices"`
+	Pending   *Pending        `json:"pending"`
+	CodeReady bool            `json:"code_ready"`
+}
+type Action struct {
+	Action    string `json:"action"`
+	Code      string `json:"code,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+}
+type Result struct {
+	OK      bool      `json:"ok"`
+	Message string    `json:"message,omitempty"`
+	Code    string    `json:"code,omitempty"`
+	HideAt  time.Time `json:"hide_at,omitempty"`
+}
+type Command struct {
+	Action
+	Context context.Context
+	Reply   chan Result
+}
+type Server struct {
+	Record   Record
+	Commands chan Command
+	dir      string
+	listener net.Listener
+	http     *http.Server
+	mu       sync.Mutex
+	devices  []Device
+	pending  *Pending
+	ready    bool
+}
+
+func New(dir string) (*Server, error) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return nil, errors.New("local control listener unavailable")
+	}
+	key := make([]byte, 32)
+	if _, err = rand.Read(key); err != nil {
+		listener.Close()
+		return nil, err
+	}
+	s := &Server{dir: dir, listener: listener, Commands: make(chan Command), Record: Record{PID: os.Getpid(), URL: "http://" + listener.Addr().String(), Token: hex.EncodeToString(key)}}
+	s.http = &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 100 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		listener.Close()
+		return nil, err
+	}
+	data, _ := json.Marshal(s.Record)
+	if err := os.WriteFile(filepath.Join(dir, "control.json"), data, 0600); err != nil {
+		listener.Close()
+		return nil, err
+	}
+	go s.http.Serve(listener)
+	return s, nil
+}
+func (s *Server) Close() {
+	s.http.Close()
+	path := filepath.Join(s.dir, "control.json")
+	var record Record
+	data, _ := os.ReadFile(path)
+	if json.Unmarshal(data, &record) == nil && record.PID == s.Record.PID && record.Token == s.Record.Token {
+		os.Remove(path)
+	}
+}
+func (s *Server) SetDevices(devices []Device) { s.mu.Lock(); s.devices = devices; s.mu.Unlock() }
+func (s *Server) SetPending(pending *Pending) { s.mu.Lock(); s.pending = pending; s.mu.Unlock() }
+func (s *Server) SetReady(ready bool)         { s.mu.Lock(); s.ready = ready; s.mu.Unlock() }
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.Host != s.listener.Addr().String() || r.Header.Get("Origin") != "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Control-Token")), []byte(s.Record.Token)) != 1 {
+		http.Error(w, `{"message":"local control authorization failed"}`, http.StatusForbidden)
+		return
+	}
+	if r.Method == "GET" && r.URL.Path == "/view" {
+		data, err := os.ReadFile(filepath.Join(s.dir, "runtime.json"))
+		var status struct {
+			PID int `json:"pid"`
+		}
+		if err != nil || json.Unmarshal(data, &status) != nil || status.PID != s.Record.PID {
+			http.Error(w, `{"message":"starting"}`, 503)
+			return
+		}
+		s.mu.Lock()
+		view := View{Status: data, Devices: s.devices, Pending: s.pending, CodeReady: s.ready}
+		s.mu.Unlock()
+		json.NewEncoder(w).Encode(view)
+		return
+	}
+	if r.Method != "POST" || r.URL.Path != "/action" {
+		http.NotFound(w, r)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var action Action
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&action) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		http.Error(w, `{"message":"invalid action"}`, 400)
+		return
+	}
+	switch action.Action {
+	case "code", "devices", "refresh", "allow", "deny", "submit-sms", "resend-sms":
+	default:
+		http.Error(w, `{"message":"unknown action"}`, 400)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	command := Command{Action: action, Context: ctx, Reply: make(chan Result, 1)}
+	select {
+	case s.Commands <- command:
+	case <-ctx.Done():
+		http.Error(w, `{"message":"control busy"}`, 504)
+		return
+	}
+	select {
+	case result := <-command.Reply:
+		json.NewEncoder(w).Encode(result)
+	case <-ctx.Done():
+		http.Error(w, `{"message":"control timeout"}`, 504)
+	}
+}

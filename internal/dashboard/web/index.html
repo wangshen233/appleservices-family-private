@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="app-token" content="__APP_TOKEN__">
+  <title>appleservices · 设备控制台</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="#"><span class="brand-icon">a<span></span></span><span>appleservices<small>设备控制台</small></span></a>
+  <span class="nav-label">工作空间</span>
+  <nav>
+    <a href="#overview" class="nav-item selected"><span class="nav-icon">◫</span>概览<span class="nav-marker"></span></a>
+    <a href="#devices" class="nav-item"><span class="nav-icon">▱</span>我的设备<span class="nav-count" id="navCount">—</span></a>
+    <a href="#requests" class="nav-item"><span class="nav-icon">◇</span>登录请求<span class="request-dot" id="requestDot" hidden></span></a>
+  </nav>
+  <div class="sidebar-note"><span class="small-orb"></span><strong>只在这台电脑运行</strong><p>关闭面板后，后台仍继续保持登录。</p></div>
+  <div class="sidebar-bottom"><span class="avatar">a</span><span id="sidebarAccount">本机账户<small>Windows 工作空间</small></span></div>
+</aside>
+<main id="overview">
+  <header class="page-header"><div><div class="eyebrow">你的 Apple 工作空间</div><h1>设备与登录<span class="heading-dot">.</span></h1><p>在一处管理设备身份、登录状态和验证码。</p></div><div class="header-actions"><span class="local-badge"><span></span>本机面板</span><button class="icon-button" id="reloadView" aria-label="刷新状态" title="刷新状态">↻</button></div></header>
+  <div id="notice" class="notice" role="status" hidden></div>
+  <section class="top-grid">
+    <article class="session-card">
+      <div class="session-top"><span class="card-kicker">登录状态</span><span class="status-badge" id="statusBadge"><i></i>正在读取</span></div>
+      <div class="session-body"><div><h2 id="sessionTitle">连接你的设备</h2><p id="sessionDescription">正在读取本机后台状态…</p><span class="account-tag" id="accountTag" hidden></span></div><div class="computer-art" aria-hidden="true"><div class="computer-screen"><div class="screen-gradient"></div><span class="screen-mark">a</span></div><div class="computer-base"></div><div class="computer-shadow"></div></div></div>
+      <div class="session-metrics"><div><span class="metric-dot" id="authDot"></span><div><small>账户认证</small><strong id="authState">正在读取</strong></div></div><div><span class="metric-dot" id="pushDot"></span><div><small>验证码推送</small><strong id="pushState">正在读取</strong></div></div><div><span class="metric-dot" id="renewDot"></span><div><small>自动续登录</small><strong id="renewState">每 10 分钟</strong></div></div></div>
+      <div class="session-actions"><button class="button button-light" id="startButton">连接账户<span>↗</span></button><button class="button button-light" id="renewButton" hidden>立即续登录<span>↻</span></button><button class="quiet-button" id="stopButton" hidden>停止后台</button><span class="session-hint" id="sessionHint">登录身份会在本机保留</span></div>
+    </article>
+    <article class="code-card"><div class="card-title-row"><div><span class="card-kicker dark">身份验证</span><h2>本机验证码</h2></div><span class="shield-icon">◇</span></div><p class="card-description">用于你正在进行的 Apple 账户登录。</p><div class="code-display" id="codeDisplay" aria-live="polite">••• <span>•••</span></div><div class="code-detail" id="codeDetail">登录后可生成六位验证码</div><div class="code-actions"><button class="button button-primary" id="codeButton" disabled>显示验证码<span>→</span></button><button class="copy-button" id="copyButton" aria-label="复制验证码" title="复制验证码" disabled>⧉</button></div><div class="code-footer"><span class="lock-icon">▣</span>仅手动显示，不写入运行日志</div></article>
+  </section>
+  <section class="verification-banner" id="smsPanel" hidden><div><span class="card-kicker dark">首次登录验证</span><h3>输入手机号收到的短信验证码</h3><p>验证码已发送到账户绑定的手机号。</p></div><form id="smsForm"><input id="smsCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="六位短信验证码" aria-label="六位短信验证码" required><button class="button button-primary" type="submit">验证并登录</button><button class="quiet-button dark-text" type="button" id="resendButton">重发短信</button></form></section>
+  <section id="devices" class="devices-section"><div class="section-heading"><div><span class="section-kicker">已关联的设备</span><h2>我的设备 <span id="deviceCount">—</span></h2></div><button class="text-button" id="devicesButton" disabled>↻<span>刷新设备</span></button></div><div class="device-grid" id="deviceGrid"><div class="empty-state">正在读取设备列表…</div></div><div class="section-footnote"><span class="footnote-dot"></span><span id="deviceUpdate">设备列表与 Apple 账户同步</span></div></section>
+  <section class="lower-grid"><article class="request-card" id="requests"><div class="card-title-row"><h3>登录请求</h3><span class="subtle-tag" id="requestTag">等待请求</span></div><div class="request-content" id="requestContent"><span class="request-symbol">✓</span><div><strong id="requestTitle">没有待处理的登录请求</strong><p id="requestText">收到新的请求时，它会出现在这里。</p></div></div><div class="request-actions" id="requestActions" hidden><button class="button button-primary" id="allowButton">允许并显示验证码</button><button class="button button-outline" id="denyButton">拒绝</button></div></article><article class="activity-card"><div class="card-title-row"><h3>最近动态</h3><span class="subtle-label">本次打开</span></div><div id="activityList" class="activity-list"><p class="empty-activity">状态变化会显示在这里</p></div></article></section>
+  <footer class="page-footer"><span>appleservices <span class="footer-separator">/</span> 本机设备控制台</span><span id="lastUpdated">正在连接后台</span></footer>
+</main>
+<dialog id="loginDialog"><form id="loginForm" class="dialog-form"><div class="dialog-top"><span class="dialog-icon">a</span><button class="dialog-close" type="button" id="closeLogin" aria-label="关闭">×</button></div><div class="eyebrow">恢复你的工作空间</div><h2>连接 Apple 账户</h2><p>沿用这台电脑已有的设备身份。密码仅用于本次登录。</p><label for="appleID">Apple 账户</label><input id="appleID" name="apple_id" type="email" autocomplete="username" placeholder="你的账户邮箱" required><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="off" placeholder="输入账户密码" required><button class="button button-primary dialog-submit" type="submit">登录并保持在线<span>→</span></button><div class="dialog-note">首次验证默认使用绑定手机号的短信。</div></form></dialog>
+<dialog id="stopDialog"><div class="dialog-form"><div class="eyebrow">后台连接</div><h2>停止保持登录？</h2><p>暂停推送接收和自动续登录。已保存的设备身份与 Cookie 会保留。</p><div class="dialog-actions"><button class="button button-outline" id="cancelStop">继续在线</button><button class="button button-danger" id="confirmStop">停止后台</button></div></div></dialog>
+</body>
+</html>

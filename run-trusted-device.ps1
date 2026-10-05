@@ -21,7 +21,7 @@ if (Test-Path -LiteralPath $taskStatusPath) {
     $taskRuntime = Get-Content -LiteralPath $taskStatusPath -Raw | ConvertFrom-Json
     if ($taskRuntime.running) {
         $taskCandidate = Get-Process -Id $taskRuntime.pid -ErrorAction SilentlyContinue
-        if ($taskCandidate -and $taskCandidate.Path -eq $taskExecutable) { $taskRunning = $taskCandidate }
+        if ($taskCandidate -and $taskCandidate.Path -in @($taskExecutable, (Join-Path $PSScriptRoot 'bin\trusted-device-gui.exe'))) { $taskRunning = $taskCandidate }
     }
 }
 if ($Status) {

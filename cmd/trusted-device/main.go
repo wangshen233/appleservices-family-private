@@ -18,6 +18,7 @@ import (
 	"github.com/Laky-64/appleservices"
 	"github.com/Laky-64/appleservices/anisette"
 	"github.com/Laky-64/appleservices/aps"
+	"github.com/Laky-64/appleservices/internal/control"
 	"github.com/Laky-64/appleservices/nativeadi"
 )
 
@@ -46,7 +47,12 @@ func run() error {
 	python := flag.String("python", "python", "64-bit Python executable for the native ADI bridge")
 	background := flag.Bool("background", false, "keep running with closed stdin; never approve requests or log generated codes")
 	refreshEvery := flag.Duration("refresh-every", 10*time.Minute, "refresh account authentication, registration and device status at this interval")
+	controlAPI := flag.Bool("control-api", false, "enable authenticated local dashboard control")
+	guiAuth := flag.Bool("gui-auth", false, "complete initial SMS verification through the dashboard")
 	flag.Parse()
+	if *background {
+		*controlAPI = true
+	}
 	if *useNativeADI {
 		*native = true
 		if *codeProvider != "" {
@@ -157,13 +163,25 @@ func run() error {
 		status.Authenticated = false
 		if status.State != "verification_required" {
 			status.State = "stopped"
+			status.VerificationRequired = false
 		}
 		if err := status.save(*dir); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
 	}()
+	var panel *control.Server
+	var panelCommands <-chan control.Command
+	if *controlAPI {
+		panel, err = control.New(*dir)
+		if err != nil {
+			return err
+		}
+		defer panel.Close()
+		panelCommands = panel.Commands
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
+	go watchStop(ctx, cancel, *dir, status.PID)
 	if *listenFor > 0 {
 		var stopListening context.CancelFunc
 		ctx, stopListening = context.WithTimeout(ctx, *listenFor)
@@ -174,10 +192,17 @@ func run() error {
 	err = push.Connect(connectCtx)
 	stop()
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 	defer push.Close()
 	status.PushConnected = true
+	status.State = "initializing"
+	if err := status.save(*dir); err != nil {
+		return err
+	}
 	if !*native {
 		if err := savePush(savedPath, push.State()); err != nil {
 			return err
@@ -205,6 +230,9 @@ func run() error {
 		err = localADI.Start(startCtx)
 		stop()
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			return err
 		}
 		defer localADI.Close()
@@ -217,13 +245,20 @@ func run() error {
 		}
 		return aps.CodeFromProcess(codeCtx, *codeProvider, codeRequest(device))
 	}
+	status.State = "signing_in"
+	if err := status.save(*dir); err != nil {
+		return err
+	}
 	login, err := appleservices.BeginLogin(appleservices.Credentials{AppleID: appleID, Password: password}, store, options...)
+	if ctx.Err() != nil {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	input := bufio.NewReader(os.Stdin)
 	if login.NeedsTwoFactor() {
-		if *background {
+		if *background && (!*guiAuth || panel == nil) {
 			status.VerificationRequired = true
 			status.State = "verification_required"
 			return errVerificationRequired
@@ -235,16 +270,70 @@ func run() error {
 		if err := login.RequestCode(factor); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "Enter the initial %s verification code: ", *method)
-		code, err := input.ReadString('\n')
-		if err != nil {
-			return errors.New("could not read initial verification code")
-		}
-		if err := login.SubmitCode(factor, strings.TrimSpace(code)); err != nil {
-			return err
+		if panel != nil && *guiAuth {
+			status.State, status.VerificationRequired = "awaiting_sms", true
+			if err := status.save(*dir); err != nil {
+				return err
+			}
+			lastSent := time.Now()
+			verified := false
+			for !verified {
+				select {
+				case <-time.After(time.Second):
+				case <-ctx.Done():
+					return nil
+				case command := <-panelCommands:
+					if command.Context.Err() != nil {
+						continue
+					}
+					result := control.Result{}
+					switch command.Action.Action {
+					case "resend-sms":
+						if time.Since(lastSent) < time.Minute {
+							result.Message = "请间隔一分钟再重发短信"
+						} else if login.RequestCode(factor) != nil {
+							result.Message = "短信发送失败，请稍后重试"
+						} else {
+							lastSent = time.Now()
+							result.OK = true
+							result.Message = "短信已发送"
+						}
+					case "submit-sms":
+						if login.SubmitCode(factor, command.Code) != nil {
+							result.Message = "验证码无效或已过期，请重新输入"
+						} else {
+							result.OK = true
+							result.Message = "验证码已验证，正在完成登录"
+							verified = true
+						}
+					default:
+						result.Message = "请先完成短信验证"
+					}
+					command.Reply <- result
+				}
+				if stopRequested(*dir, status.PID) {
+					return nil
+				}
+			}
+			status.State, status.VerificationRequired = "signing_in", false
+			if err := status.save(*dir); err != nil {
+				return err
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Enter the initial %s verification code: ", *method)
+			code, err := input.ReadString('\n')
+			if err != nil {
+				return errors.New("could not read initial verification code")
+			}
+			if err := login.SubmitCode(factor, strings.TrimSpace(code)); err != nil {
+				return err
+			}
 		}
 	}
 	client, err := login.Client()
+	if ctx.Err() != nil {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -262,12 +351,21 @@ func run() error {
 	if err := active.RegisterDevice(registration); err != nil {
 		return err
 	}
+	if ctx.Err() != nil {
+		return nil
+	}
 	fmt.Println("Apple accepted the registration request. Waiting for real AuthKit delivery; trusted-device reception is not yet verified.")
 	devices, err := active.AccountDevices()
+	if ctx.Err() != nil {
+		return nil
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Could not verify account device status:", err)
 	} else {
 		status.setDevices(devices, *name)
+		if panel != nil {
+			panel.SetDevices(panelDevices(devices, *name))
+		}
 		for _, entry := range devices {
 			if entry.Name == *name {
 				fmt.Println("An entry with the announced name is visible in the account device list; this alone does not prove trust.")
@@ -285,6 +383,9 @@ func run() error {
 		status.State = "device_query_failed"
 	}
 	status.LastRefreshAt = time.Now().UTC()
+	if panel != nil {
+		panel.SetReady(!*listenOnly)
+	}
 	if err := status.save(*dir); err != nil {
 		return err
 	}
@@ -313,9 +414,15 @@ func run() error {
 			}
 			if event.Command == 100 {
 				pending = event.TransactionID
+				if panel != nil {
+					panel.SetPending(&control.Pending{ID: requestID(pending), ReceivedAt: time.Now().UTC()})
+				}
 			}
 			if event.Command == 400 && pending == event.PreviousTransactionID {
 				pending = ""
+				if panel != nil {
+					panel.SetPending(nil)
+				}
 			}
 			pendingMu.Unlock()
 			select {
@@ -347,10 +454,91 @@ func run() error {
 	}
 	refresh := time.NewTicker(*refreshEvery)
 	defer refresh.Stop()
-	control := time.NewTicker(time.Second)
-	defer control.Stop()
 	beginRenewal := func() (maintainedLogin, error) {
 		return appleservices.BeginLogin(appleservices.Credentials{AppleID: appleID, Password: password}, store, options...)
+	}
+	renew := func() control.Result {
+		renewed, devices, err := renewSession(beginRenewal, accountID, registration)
+		if err != nil {
+			status.State = "refresh_failed"
+			if errors.Is(err, errVerificationRequired) {
+				status.State, status.VerificationRequired = "verification_required", true
+			}
+			status.save(*dir)
+			return control.Result{Message: "续登录失败，请检查登录状态"}
+		}
+		active = renewed
+		status.State, status.Authenticated = "online", true
+		status.LastRefreshAt = time.Now().UTC()
+		status.RefreshCount++
+		status.setDevices(devices, *name)
+		if panel != nil {
+			panel.SetDevices(panelDevices(devices, *name))
+		}
+		if err := status.save(*dir); err != nil {
+			return control.Result{Message: "无法保存登录状态"}
+		}
+		return control.Result{OK: true, Message: "登录已续期，设备列表已更新"}
+	}
+	performAction := func(action, visibleRequestID string) control.Result {
+		if action == "refresh" {
+			return renew()
+		}
+		if action == "devices" {
+			devices, err := active.AccountDevices()
+			if err != nil {
+				return control.Result{Message: "设备列表获取失败，请稍后重试"}
+			}
+			status.setDevices(devices, *name)
+			if panel != nil {
+				panel.SetDevices(panelDevices(devices, *name))
+			}
+			if active.SaveSession() != nil || status.save(*dir) != nil {
+				return control.Result{Message: "无法保存登录状态"}
+			}
+			return control.Result{OK: true, Message: fmt.Sprintf("已更新 %d 台设备", len(devices))}
+		}
+		if action != "code" && action != "allow" && action != "deny" {
+			return control.Result{Message: "当前无需短信验证码"}
+		}
+		if *listenOnly {
+			return control.Result{Message: "观察模式不能生成验证码或批准登录"}
+		}
+		pendingMu.Lock()
+		transaction := pending
+		pendingMu.Unlock()
+		if action != "code" && (transaction == "" || (visibleRequestID != "" && visibleRequestID != requestID(transaction))) {
+			return control.Result{Message: "登录请求已取消或发生变化"}
+		}
+		code := ""
+		if action != "deny" {
+			generationCtx, stop := context.WithTimeout(ctx, 15*time.Second)
+			code, err = generateCode(generationCtx)
+			stop()
+			if err != nil {
+				return control.Result{Message: "本机验证码生成失败"}
+			}
+		}
+		if action != "code" {
+			pendingMu.Lock()
+			same := pending == transaction
+			pendingMu.Unlock()
+			if !same {
+				return control.Result{Message: "登录请求已取消或发生变化"}
+			}
+			if active.RespondToSignIn(transaction, action == "allow") != nil {
+				return control.Result{Message: "Apple 未接受本次登录响应"}
+			}
+			pendingMu.Lock()
+			if pending == transaction {
+				pending = ""
+				if panel != nil {
+					panel.SetPending(nil)
+				}
+			}
+			pendingMu.Unlock()
+		}
+		return control.Result{OK: true, Code: code, HideAt: time.Now().Add(time.Minute).UTC(), Message: "操作已完成"}
 	}
 	for {
 		select {
@@ -361,29 +549,24 @@ func run() error {
 			return ctx.Err()
 		case err := <-errorsCh:
 			return err
-		case <-control.C:
-			if stopRequested(*dir, status.PID) {
-				return nil
+		case command := <-panelCommands:
+			if command.Context.Err() != nil {
+				continue
 			}
+			if (command.Action.Action == "allow" || command.Action.Action == "deny") && command.RequestID == "" {
+				command.Reply <- control.Result{Message: "请重新查看当前登录请求"}
+				continue
+			}
+			command.Reply <- performAction(command.Action.Action, command.RequestID)
 		case <-refresh.C:
-			renewed, devices, err := renewSession(beginRenewal, accountID, registration)
-			if err != nil {
-				status.State = "refresh_failed"
-				if errors.Is(err, errVerificationRequired) {
-					status.State, status.VerificationRequired = "verification_required", true
-					return err
-				}
-				fmt.Fprintln(os.Stderr, "Session renewal failed; keeping the existing connection:", err)
-			} else {
-				active = renewed
-				status.State, status.Authenticated = "online", true
-				status.LastRefreshAt = time.Now().UTC()
-				status.RefreshCount++
-				status.setDevices(devices, *name)
-				fmt.Printf("Session renewed. Device query succeeded: count=%d, installation_visible=%t.\n", status.DeviceCount, status.InstallationVisible)
+			result := renew()
+			if status.VerificationRequired {
+				return errVerificationRequired
 			}
-			if err := status.save(*dir); err != nil {
-				return err
+			if result.OK {
+				fmt.Printf("Session renewed. Device query succeeded: count=%d, installation_visible=%t.\n", status.DeviceCount, status.InstallationVisible)
+			} else {
+				fmt.Fprintln(os.Stderr, "Session renewal failed; retaining the existing connection.")
 			}
 		case event := <-events:
 			if event.Command == 1200 {
@@ -410,69 +593,15 @@ func run() error {
 				fmt.Fprintln(os.Stderr, "Sign-in input closed; session and reception remain active.")
 				continue
 			}
-			if choice == "devices" {
-				devices, err := active.AccountDevices()
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "Device query failed:", err)
-					continue
-				}
-				status.setDevices(devices, *name)
-				fmt.Printf("Device query succeeded: count=%d, installation_visible=%t.\n", status.DeviceCount, status.InstallationVisible)
-				if err := active.SaveSession(); err != nil {
-					return err
-				}
-				if err := status.save(*dir); err != nil {
-					return err
-				}
+			if choice != "devices" && choice != "refresh" && choice != "code" && choice != "allow" && choice != "deny" {
 				continue
 			}
-			if choice == "code" {
-				generationCtx, stop := context.WithTimeout(ctx, 15*time.Second)
-				code, err := generateCode(generationCtx)
-				stop()
-				if err != nil {
-					return err
-				}
-				fmt.Println("Apple verification code:", code)
-				continue
+			result := performAction(choice, "")
+			if result.Code != "" {
+				fmt.Println("Apple verification code:", result.Code)
+			} else {
+				fmt.Fprintln(os.Stderr, result.Message)
 			}
-			if choice != "allow" && choice != "deny" {
-				continue
-			}
-			pendingMu.Lock()
-			transaction := pending
-			pendingMu.Unlock()
-			if transaction == "" {
-				fmt.Fprintln(os.Stderr, "No pending sign-in request.")
-				continue
-			}
-			code := ""
-			if choice == "allow" {
-				generationCtx, stop := context.WithTimeout(ctx, 15*time.Second)
-				code, err = generateCode(generationCtx)
-				stop()
-				if err != nil {
-					return err
-				}
-			}
-			pendingMu.Lock()
-			stillPending := pending == transaction
-			pendingMu.Unlock()
-			if !stillPending {
-				fmt.Fprintln(os.Stderr, "The request changed or was cancelled; no code displayed.")
-				continue
-			}
-			if err := active.RespondToSignIn(transaction, choice == "allow"); err != nil {
-				return err
-			}
-			if choice == "allow" {
-				fmt.Println("Apple verification code:", code)
-			}
-			pendingMu.Lock()
-			if pending == transaction {
-				pending = ""
-			}
-			pendingMu.Unlock()
 		}
 	}
 }
