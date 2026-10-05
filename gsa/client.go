@@ -20,6 +20,7 @@ import (
 
 	"github.com/Laky-64/appleservices/internal/httpx"
 	"github.com/Laky-64/appleservices/internal/srp"
+	"github.com/Laky-64/appleservices/internal/uuid"
 	"howett.net/plist"
 )
 
@@ -35,6 +36,19 @@ type Client struct {
 	smsCodeAlreadySent    bool
 	loginPayload          map[string]any
 	verifiedTokens        map[string]string
+	pushToken             []byte
+	nativeDevice          bool
+	requestID             string
+}
+
+func (c *Client) EnableNativeDeviceAuthentication() { c.nativeDevice = true }
+
+func (c *Client) SetPushToken(token []byte) error {
+	if len(token) != 0 && len(token) != 32 {
+		return errors.New("gsa: APS token must be 32 bytes")
+	}
+	c.pushToken = append([]byte(nil), token...)
+	return nil
 }
 
 func (c *Client) anisetteHeaders() (map[string]string, error) {
@@ -109,6 +123,15 @@ func (c *Client) doRequest(request map[string]any) (map[string]any, error) {
 	if ci := caseInsensitiveLookup(anisetteHeaders, "X-Mme-Client-Info"); ci != "" {
 		headers["X-Mme-Client-Info"] = ci
 	}
+	if c.nativeDevice {
+		headers["X-Apple-AK-Context-Type"] = "icloud"
+		headers["X-Apple-Client-App-Name"] = "AppleIDSettings"
+		headers["X-Apple-I-Client-Bundle-Id"] = "com.apple.systempreferences.AppleIDSettings"
+		headers["Accept-Language"] = "en-US,en;q=0.9"
+		if strings.Contains(headers["X-Mme-Client-Info"], "<macOS;13.1;") {
+			headers["User-Agent"] = "akd/1.0 CFNetwork/1399 Darwin/22.1.0"
+		}
+	}
 
 	result, err := http.ExecuteRequest(gsaBaseURL+"/grandslam/GsService2",
 		http.Method("POST"),
@@ -162,6 +185,20 @@ func (c *Client) buildCPD() (map[string]any, error) {
 		"pbe":       false,
 		"prkgen":    true,
 		"svct":      "iCloud",
+	}
+	if len(c.pushToken) == 32 {
+		cpd["ptkn"] = strings.ToUpper(fmt.Sprintf("%x", c.pushToken))
+	}
+	if c.nativeDevice {
+		cpd["svct"] = "icloud"
+		cpd["capp"] = "AppleIDSettings"
+		cpd["cbid"] = "com.apple.systempreferences.AppleIDSettings"
+		cpd["loc"], cpd["cou"] = "en_US", "US"
+		cpd["X-Apple-I-Request-UUID"] = c.requestID
+		cpd["X-Apple-I-Device-Configuration-Mode"] = "0"
+		cpd["X-Apple-Requested-Partition"] = "0"
+		cpd["X-Apple-Security-Upgrade-Context"] = "com.apple.authkit.generic"
+		cpd["at"], cpd["ckgen"], cpd["fcd"] = 0, true, true
 	}
 	for k, v := range h {
 		if !strings.EqualFold(k, "User-Agent") {
@@ -234,6 +271,7 @@ func decryptSPD(sessionKey, spd []byte) (map[string]any, error) {
 }
 
 func (c *Client) Login(username, password string) (*LoginResult, error) {
+	c.requestID = strings.ToUpper(uuid.New())
 	c.smsPhoneID = 0
 	c.smsCodeAlreadySent = false
 	c.verifiedTokens = nil

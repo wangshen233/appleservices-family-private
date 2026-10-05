@@ -43,6 +43,7 @@ type Login struct {
 	adsid          string
 	idmsToken      string
 	client         *Client
+	serialNumber   string
 }
 
 func BeginLogin(creds Credentials, store Store, opts ...Option) (*Login, error) {
@@ -66,6 +67,9 @@ func BeginLogin(creds Credentials, store Store, opts ...Option) (*Login, error) 
 			return nil, fmt.Errorf("appleservices: load device: %w", err)
 		}
 		st := anisette.NewState()
+		if dev != nil {
+			l.serialNumber = dev.SerialNumber
+		}
 		if dev != nil && len(dev.Identifier) == 16 {
 			st = anisette.State{Identifier: dev.Identifier, AdiPB: dev.ProvisioningBlob}
 		}
@@ -82,7 +86,27 @@ func BeginLogin(creds Credentials, store Store, opts ...Option) (*Login, error) 
 		s := toGSASession(*sess)
 		gsess = &s
 	}
+	if o.serialNumber != "" {
+		l.serialNumber = o.serialNumber
+	}
+	if l.serialNumber != "" {
+		l.anisette = identityAnisette{provider: l.anisette, serial: l.serialNumber}
+	}
 	l.backend = o.newBackend(l.anisette, gsess)
+	if l.serialNumber != "" {
+		if backend, ok := l.backend.(interface{ EnableNativeDeviceAuthentication() }); ok {
+			backend.EnableNativeDeviceAuthentication()
+		}
+	}
+	if len(o.pushToken) > 0 {
+		backend, ok := l.backend.(interface{ SetPushToken([]byte) error })
+		if !ok {
+			return nil, errors.New("appleservices: backend cannot bind an APS token")
+		}
+		if err := backend.SetPushToken(o.pushToken); err != nil {
+			return nil, err
+		}
+	}
 	// Cached cookies may avoid a new 2FA prompt, but never establish login on their own.
 	if err := l.authenticate(); err != nil {
 		return nil, err
@@ -95,7 +119,7 @@ func (l *Login) persistDevice() error {
 		return nil
 	}
 	st := l.stateful.State()
-	if err := l.store.SaveDevice(&Device{Identifier: st.Identifier, ProvisioningBlob: st.AdiPB}); err != nil {
+	if err := l.store.SaveDevice(&Device{Identifier: st.Identifier, ProvisioningBlob: st.AdiPB, SerialNumber: l.serialNumber}); err != nil {
 		return fmt.Errorf("appleservices: save device: %w", err)
 	}
 	return nil

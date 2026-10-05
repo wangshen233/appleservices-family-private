@@ -27,6 +27,7 @@ func Logout(store Store) error {
 type Device struct {
 	Identifier       []byte
 	ProvisioningBlob []byte
+	SerialNumber     string `json:",omitempty"`
 }
 
 type Session struct {
@@ -53,6 +54,19 @@ type options struct {
 	newBackend    backendFactory
 	fetchDelegate delegateFetcher
 	servers       []string
+	serialNumber  string
+	pushToken     []byte
+}
+
+// WithDeviceSerialNumber identifies this installation in account-device calls.
+// Use a stable value for the lifetime of the installation.
+func WithDeviceSerialNumber(serial string) Option {
+	return func(o *options) { o.serialNumber = serial }
+}
+
+// WithPushToken binds authentication to a device token obtained from APS.
+func WithPushToken(token []byte) Option {
+	return func(o *options) { o.pushToken = append([]byte(nil), token...) }
 }
 
 func WithAnisette(p gsa.AnisetteProvider) Option {

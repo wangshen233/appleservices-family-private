@@ -3,6 +3,10 @@
 这个版本只保留设备身份认证、Apple ID 登录、双重验证和 iCloud 登录令牌获取。
 成功获取 `mmeAuthToken` 后结束，不恢复钥匙串，不读取密码、照片、联系人或设备列表，也不修改云端数据。
 
+`cmd/login` 不执行账号设备注册或 Apple 验证码推送接收。登录成功指 Apple 接受认证并返回 iCloud 令牌，
+不保证本程序出现在 Apple 账号设备列表，也不表示它成为能接收后续 2FA 的受信任设备。
+`state/device.json` 保存的是 anisette 认证身份；验证码仍需从已有受信任设备或绑定手机号获取并手动输入。
+
 ## Windows 运行
 
 需要 Go 1.26 或更新版本（已有 `bin/login.exe` 时可直接运行）。
@@ -49,7 +53,8 @@ go build -o .\bin\login.exe ./cmd/login
 成功时只输出：
 
 ```text
-iCloud login successful. Trusted session saved.
+iCloud authentication successful. Session cookies saved.
+This command does not register a trusted device or receive verification codes.
 ```
 
 失败返回非零退出码。程序不打印密码、令牌、Cookie 或账号内部编号。
@@ -72,7 +77,7 @@ if login.NeedsTwoFactor() {
         return err
     }
 }
-client, err := login.Client() // 完成 iCloud 登录，保存可信会话
+client, err := login.Client() // 完成 iCloud 认证，保存会话 Cookie
 if err != nil {
     return err
 }
@@ -129,8 +134,17 @@ go vet ./...
 ```
 
 测试使用本地模拟认证和本地 HTTP 服务，不访问真实 Apple 账号。
-本次已使用用户授权账号完成真实短信验证和 iCloud 登录；未额外验证其他账号或后续免验证码登录。
+本次已使用用户授权账号完成真实短信验证和 iCloud 登录，并使用保存的会话再次通过密码认证及 iCloud 令牌交换，未再次要求验证码。
+未验证其他账号。随后已通过本机 Apple 推送服务取得真实令牌，设备登记请求被接受，
+并实际收到一次新登录的 AuthKit 请求；生成六位码并被 Apple 接受仍未完成。
 这是非官方私有协议实现。
+
+## 受信任设备实验入口（尚未完成）
+
+已增加 `cmd/trusted-device`、账号设备登记接口和 APS 接收传输。完整使用条件与目前缺失的核心组件见
+[受信任设备实现记录](docs/trusted-device.md)。Windows 可用 `-native-push` 调用已安装的 iCloud 推送服务，
+无需导出客户端证书；`-listen-only` 可观察真实通知。当前仍缺少可工作的六位码生成器，
+本机 CoreADI 的对应调用实测返回 `-45019`，完整收码验收未通过。普通登录命令仍可独立使用。
 
 原始源码保存在 Git 的初始提交 `d6fb108`，也有 `backups/original-source.zip` 备份。
 

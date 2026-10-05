@@ -86,7 +86,8 @@ func run(args []string, input io.Reader, output, errOutput io.Writer) error {
 		return err
 	}
 	// Do not print account IDs, credentials, cookies, or tokens.
-	fmt.Fprintln(output, "iCloud login successful. Trusted session saved.")
+	fmt.Fprintln(output, "iCloud authentication successful. Session cookies saved.")
+	fmt.Fprintln(output, "This command does not register a trusted device or receive verification codes.")
 	return nil
 }
 
