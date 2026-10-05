@@ -80,3 +80,10 @@ RFC 5054 模式、`no_username_in_x` 模式下的计算一致。
 
 之后的登录执行被自动审批阻止，理由是向第三方 anisette 服务发送设备标识和 provisioning
 数据需要明确授权；在取得授权前没有继续该尝试。
+
+用户随后明确授权使用该服务，继续进行了一次实际认证：设备 provisioning 完成，
+GrandSlam `init` 返回了可解析的 SRP 挑战；`complete` 请求返回 HTTP 429。
+没有得到服务端 M2 / SPD，也未进入双重验证码或 iCloud delegate 交换。
+因此账号密码正确性和实际 iCloud 登录仍未验证，未保存可信会话。
+为避免连续提交被限流的请求，没有继续重试。
+该记录不包含账号、密码、设备标识或 provisioning 数据。
