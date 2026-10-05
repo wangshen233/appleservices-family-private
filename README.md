@@ -109,6 +109,9 @@ _ = client
 `s2k`、`s2k_fo` 的计算已通过独立 Python SRP 实现生成的参考向量验证。
 来源、无凭据探测结果及验证边界见 [协议核查记录](docs/protocol-audit.md)。
 
+Apple 请求的证书验证传输现在遵循 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 配置。
+原来的传输会绕过环境代理，可能在设备初始化之前就出现连接被拒绝。
+
 ## 验证与限制
 
 ```powershell

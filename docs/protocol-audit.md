@@ -67,3 +67,16 @@ RFC 5054 模式、`no_username_in_x` 模式下的计算一致。
 已通过本地协议序列化、响应解析、SRP 参考向量和登录状态机测试。
 未使用真实账号测试 GrandSlam、可信设备 / 短信验证码或 iCloud delegate 登录。
 实际可用性仍需由账号持有人运行 `run-login.ps1` 完成验证；如失败，阶段和错误代码可用于进一步定位。
+
+## 实际尝试时的网络修复
+
+同日实际尝试时，程序在 anisette 初始化所需的 Apple URL bag 请求阶段遇到本机连接拒绝，
+尚未完成账号认证。发现 `AppleRootTransport` 自建的传输没有配置环境代理，
+而运行环境需要使用代理。
+
+现已从 Go 默认传输克隆配置并使用 `ProxyFromEnvironment`，保留 Apple 根证书及 TLS 验证。
+修复后的无凭据 `GET /grandslam/GsService2/lookup` 返回 HTTP 200、XML plist、25,582 字节。
+这只验证设备初始化接口可达，不代表账号、密码或双重验证已通过。
+
+之后的登录执行被自动审批阻止，理由是向第三方 anisette 服务发送设备标识和 provisioning
+数据需要明确授权；在取得授权前没有继续该尝试。

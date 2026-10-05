@@ -12,7 +12,15 @@ func AppleRootTransport() http.RoundTripper {
 		pool = x509.NewCertPool()
 	}
 	pool.AppendCertsFromPEM([]byte(AppleRootCAPEM))
-	return &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = http.ProxyFromEnvironment
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	transport.TLSClientConfig.RootCAs = pool
+	return transport
 }
 
 const AppleRootCAPEM = `-----BEGIN CERTIFICATE-----
