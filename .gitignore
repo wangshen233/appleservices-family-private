@@ -5,3 +5,5 @@ backups/
 bin/
 state/
 *.exe
+__pycache__/
+*.pyc

@@ -18,6 +18,7 @@ import (
 	"github.com/Laky-64/appleservices"
 	"github.com/Laky-64/appleservices/anisette"
 	"github.com/Laky-64/appleservices/aps"
+	"github.com/Laky-64/appleservices/nativeadi"
 )
 
 func main() {
@@ -40,7 +41,16 @@ func run() error {
 	probeNative := flag.Bool("probe-native-push", false, "check native token and local callback; no account registration")
 	listenOnly := flag.Bool("listen-only", false, "register and observe notifications; do not approve requests or generate codes")
 	listenFor := flag.Duration("listen-for", 0, "stop after this duration; 0 keeps listening")
+	useNativeADI := flag.Bool("native-adi", false, "generate headers and verification codes with the verified Windows native ADI module")
+	adiLibrary := flag.String("adi-dll", "./.cache/openbubbles-store/rust_lib_bluebubbles.dll", "verified OpenBubbles 1.18.800.0 native module path")
+	python := flag.String("python", "python", "64-bit Python executable for the native ADI bridge")
 	flag.Parse()
+	if *useNativeADI {
+		*native = true
+		if *codeProvider != "" {
+			return errors.New("native-adi cannot be combined with an external code-provider")
+		}
+	}
 	if *probeNative {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -61,7 +71,7 @@ func run() error {
 	if strings.TrimSpace(*name) == "" || strings.TrimSpace(*dir) == "" {
 		return errors.New("name and state directory are required")
 	}
-	if !*listenOnly {
+	if !*listenOnly && !*useNativeADI {
 		if err := aps.ValidateCodeProvider(*codeProvider); err != nil {
 			return err
 		}
@@ -112,6 +122,18 @@ func run() error {
 		return err
 	}
 	if *check {
+		if *useNativeADI {
+			library, err := filepath.Abs(*adiLibrary)
+			if err != nil {
+				return errors.New("could not resolve native ADI module path")
+			}
+			if err := nativeadi.ValidateLibrary(library); err != nil {
+				return err
+			}
+			if err := nativeadi.CheckRuntime(*python); err != nil {
+				return err
+			}
+		}
 		fmt.Println("Local inputs available. Apple trust and code delivery have not been verified.")
 		return nil
 	}
@@ -144,8 +166,36 @@ func run() error {
 	if serial == "" {
 		serial = "AS" + strings.ToUpper(fmt.Sprintf("%x", identity[:5]))
 	}
-	login, err := appleservices.BeginLogin(appleservices.Credentials{AppleID: appleID, Password: password}, store,
-		appleservices.WithAnisetteServers(*server), appleservices.WithDeviceSerialNumber(serial), appleservices.WithPushToken(push.State().Token))
+	options := []appleservices.Option{appleservices.WithAnisetteServers(*server), appleservices.WithDeviceSerialNumber(serial), appleservices.WithPushToken(push.State().Token)}
+	var localADI *nativeadi.Client
+	if *useNativeADI {
+		library, err := filepath.Abs(*adiLibrary)
+		if err != nil {
+			return errors.New("could not resolve native ADI module path")
+		}
+		localADI, err = nativeadi.NewClient(nativeadi.Config{LibraryPath: library, ProfileDir: filepath.Join(*dir, "native-adi"),
+			Python: *python, Identifier: device.Identifier, Serial: serial, PushToken: push.State().Token})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "Starting the verified local ADI generation module ...")
+		startCtx, stop := context.WithTimeout(ctx, 90*time.Second)
+		err = localADI.Start(startCtx)
+		stop()
+		if err != nil {
+			return err
+		}
+		defer localADI.Close()
+		options = append(options, appleservices.WithAnisette(localADI))
+		fmt.Fprintln(os.Stderr, "Local six-digit generation is available for the same device identity.")
+	}
+	generateCode := func(codeCtx context.Context) (string, error) {
+		if localADI != nil {
+			return localADI.Code(codeCtx)
+		}
+		return aps.CodeFromProcess(codeCtx, *codeProvider, codeRequest(device))
+	}
+	login, err := appleservices.BeginLogin(appleservices.Credentials{AppleID: appleID, Password: password}, store, options...)
 	if err != nil {
 		return err
 	}
@@ -158,7 +208,7 @@ func run() error {
 		if err := login.RequestCode(factor); err != nil {
 			return err
 		}
-		fmt.Fprint(os.Stderr, "Enter the initial sign-in verification code: ")
+		fmt.Fprintf(os.Stderr, "Enter the initial %s verification code: ", *method)
 		code, err := input.ReadString('\n')
 		if err != nil {
 			return errors.New("could not read initial verification code")
@@ -173,7 +223,7 @@ func run() error {
 	}
 	if !*listenOnly {
 		generationCtx, stop := context.WithTimeout(ctx, 15*time.Second)
-		_, err = aps.CodeFromProcess(generationCtx, *codeProvider, codeRequest(device))
+		_, err = generateCode(generationCtx)
 		stop()
 		if err != nil {
 			return fmt.Errorf("code-generation prerequisite failed before account registration: %w", err)
@@ -198,6 +248,8 @@ func run() error {
 	}
 	if *listenOnly {
 		fmt.Println("Observation mode: no codes will be generated and no sign-in requests will be approved.")
+	} else {
+		fmt.Println("Type code to generate a verification code manually, or wait for a sign-in request.")
 	}
 	var pendingMu sync.Mutex
 	var pending string
@@ -250,7 +302,7 @@ func run() error {
 	for {
 		select {
 		case <-ctx.Done():
-			if *listenOnly && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if errors.Is(ctx.Err(), context.Canceled) || (*listenFor > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded)) {
 				return nil
 			}
 			return ctx.Err()
@@ -272,7 +324,20 @@ func run() error {
 			}
 		case choice, ok := <-choices:
 			if !ok {
+				if ctx.Err() != nil {
+					return nil
+				}
 				return errors.New("sign-in input closed")
+			}
+			if choice == "code" {
+				generationCtx, stop := context.WithTimeout(ctx, 15*time.Second)
+				code, err := generateCode(generationCtx)
+				stop()
+				if err != nil {
+					return err
+				}
+				fmt.Println("Apple verification code:", code)
+				continue
 			}
 			if choice != "allow" && choice != "deny" {
 				continue
@@ -287,7 +352,7 @@ func run() error {
 			code := ""
 			if choice == "allow" {
 				generationCtx, stop := context.WithTimeout(ctx, 15*time.Second)
-				code, err = aps.CodeFromProcess(generationCtx, *codeProvider, codeRequest(device))
+				code, err = generateCode(generationCtx)
 				stop()
 				if err != nil {
 					return err

@@ -1,11 +1,13 @@
-# appleservices — iCloud 登录版
+# appleservices — iCloud 登录与 Windows 验证码
 
-这个版本只保留设备身份认证、Apple ID 登录、双重验证和 iCloud 登录令牌获取。
-成功获取 `mmeAuthToken` 后结束，不恢复钥匙串，不读取密码、照片、联系人或设备列表，也不修改云端数据。
+这个版本提供设备身份认证、Apple ID 登录、双重验证和 iCloud 登录令牌获取。
+普通登录成功获取 `mmeAuthToken` 后结束，不恢复钥匙串，不读取密码、照片或联系人。
+可选的 Windows 验证码入口会登记设备、查询设备状态和监听 AuthKit 登录请求。
 
 `cmd/login` 不执行账号设备注册或 Apple 验证码推送接收。登录成功指 Apple 接受认证并返回 iCloud 令牌，
 不保证本程序出现在 Apple 账号设备列表，也不表示它成为能接收后续 2FA 的受信任设备。
-`state/device.json` 保存的是 anisette 认证身份；验证码仍需从已有受信任设备或绑定手机号获取并手动输入。
+`state/device.json` 保存稳定认证身份。普通登录的验证码需手动输入；
+Windows 本机验证码入口见下文。
 
 ## Windows 运行
 
@@ -136,15 +138,32 @@ go vet ./...
 测试使用本地模拟认证和本地 HTTP 服务，不访问真实 Apple 账号。
 本次已使用用户授权账号完成真实短信验证和 iCloud 登录，并使用保存的会话再次通过密码认证及 iCloud 令牌交换，未再次要求验证码。
 未验证其他账号。随后已通过本机 Apple 推送服务取得真实令牌，设备登记请求被接受，
-并实际收到一次新登录的 AuthKit 请求；生成六位码并被 Apple 接受仍未完成。
+并实际收到新登录的 AuthKit 请求。随后接入 Windows 本机 ADI 模块，
+本机生成码被另一个需要双重验证的新会话接受，该会话也完成了 iCloud 令牌交换。
+验收没有使用测试期间发到 iPhone 的验证码。
 这是非官方私有协议实现。
 
-## 受信任设备实验入口（尚未完成）
+## Windows 本机验证码
 
-已增加 `cmd/trusted-device`、账号设备登记接口和 APS 接收传输。完整使用条件与目前缺失的核心组件见
-[受信任设备实现记录](docs/trusted-device.md)。Windows 可用 `-native-push` 调用已安装的 iCloud 推送服务，
-无需导出客户端证书；`-listen-only` 可观察真实通知。当前仍缺少可工作的六位码生成器，
-本机 CoreADI 的对应调用实测返回 `-45019`，完整收码验收未通过。普通登录命令仍可独立使用。
+本机已验证的入口：
+
+```powershell
+.\setup-native-adi.ps1
+.\run-trusted-device.ps1 -Check
+.\run-trusted-device.ps1
+```
+
+需要已安装的 iCloud for Windows、Go、64 位 Python 3.10+、gcc/MinGW，以及经过签名和哈希校验的
+OpenBubbles 1.18.800.0 Windows 模块。此机器已有对应 Store 包缓存，脚本不自动下载或安装软件。
+沿用已有 `state/device.json`；其他机器先用普通登录入口建立状态。
+账号密码由脚本提示输入；首次验证默认向绑定手机号发短信。
+
+登录后输入 `code` 可主动显示本机生成的六位码；收到登录请求时可输入 `allow` 或 `deny`。
+发送一次测试登录请求可能也会通知账号原有的 iPhone。这个通知与首次短信验证是两个不同的步骤。
+
+本机生成码的真实登录验收已通过。Apple 网页是否把它显示为独立新增设备、
+网页里的受信任标记，以及 `allow` 按钮流程仍未完成验收；本次测试的推送随后被取消，
+使用手动 `code` 完成验证。依赖和精确验证边界见 [实现记录](docs/trusted-device.md)。
 
 原始源码保存在 Git 的初始提交 `d6fb108`，也有 `backups/original-source.zip` 备份。
 

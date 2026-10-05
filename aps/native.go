@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf16"
@@ -105,8 +106,15 @@ func nativeCommand(probe bool) (*exec.Cmd, error) {
 	}
 	// Only embedded program text goes to PowerShell. No credentials, notification
 	// contents, provider paths, or user supplied shell expressions are arguments.
-	return exec.Command(filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-		"-NoLogo", "-NoProfile", "-NonInteractive", "-Mta", "-EncodedCommand", base64.StdEncoding.EncodeToString(data)), nil
+	command := exec.Command(filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+		"-NoLogo", "-NoProfile", "-NonInteractive", "-Mta", "-EncodedCommand", base64.StdEncoding.EncodeToString(data))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !strings.EqualFold(key, "APPLESERVICES_APPLEID") && !strings.EqualFold(key, "APPLESERVICES_PASSWORD") {
+			command.Env = append(command.Env, entry)
+		}
+	}
+	return command, nil
 }
 
 func (c *NativeClient) Connect(ctx context.Context) error {

@@ -1,158 +1,133 @@
-# 受信任设备与验证码接收
+# Windows 本机验证码与设备登记
 
-核查日期：2026-10-05。目标是这台 Windows 上的程序成为账号的验证码接收设备。
+验证日期：2026-10-05。
 
-## 当前结果
+## 真实结果
 
-**设备登记请求已被 Apple 接受，已实际收到新登录的 AuthKit 请求；尚不能生成并验证六位码。**
-Windows 原生推送路径已走通，剩余核心缺口是与登录身份一致的六位码生成组件。
+**Windows 本机生成的六位码已被 Apple 接受，另一个需要双重验证的新会话完成了 iCloud 登录。**
 
-真实账号验证结果：
+验收顺序：
 
-- 密码认证和 iCloud 令牌交换继续成功；没有重新要求验证码。
-- 账号设备查询返回 3 个现有设备，未输出设备名称、序列号或账号编号。
-- 不带有效 APS 令牌的 `postdata` 被拒绝：HTTP 401，`ec=-800012`，`Push token is invalid.`。
-- 根据这个结果，登记 API 已改为要求 32 字节 APS 令牌；CLI 只使用 APS 成功认证返回的令牌。
-- 本机已安装 iCloud 15.8.118.0。调用已注册的 `IAPSNotificationServer`，获得真实 32 字节令牌。
-- 带该令牌重新登录并调用 `postdata` 成功，设备列表中出现与登记名称一致的条目。
-  设备总数仍为 3，不能据此声称新增了第 4 台设备或已完成验证码能力验证。
-- 订阅 `com.apple.idmsauth` 后，收到当前账号的命令 1200（设备状态变化）。
-- 独立创建新登录身份，密码认证进入双重验证，请求受信任设备验证码成功；
-  监听程序随后收到该账号的命令 100（登录请求）和命令 400（取消）。
-- 本机 `CoreADI64.dll` 初始化成功，但公开定义的六位码调用 `0x385b2ce8` 返回 `-45019`（调用未实现），没有产生验证码。
-- 没有伪造注册成功，没有恢复钥匙串、修改云端访问权限或删除原有设备。
+1. 从本机 iCloud for Windows 的 APS COM 服务取得真实 32 字节推送令牌。
+2. 为原有稳定身份生成本机 ADI 认证头，首次认证使用绑定手机号的短信验证码。
+3. 完成账号认证、iCloud 令牌交换和 Apple 设备登记。
+4. 重启程序，沿用本机 provisioning 状态重新认证，未重新要求短信。
+5. 独立登录身份进入双重验证，请求受信任设备验证码；Windows 收到命令 100。
+6. 请求随后收到命令 400（取消），没有声称 `allow` 按钮流程已通过。
+7. 在 Windows 输入 `code`，由本机模块生成六位码，直接提交给待验证的新会话。
+8. `SubmitCode(TrustedDevice, ...)` 成功，随后 `Client()` 成功，退出码 0。
 
-序列号曾固定为 `0`。现支持安装级稳定序列号，并将它保存在已有 `state/device.json` 中。
-新的身份字段不会重新生成 anisette 的 16 字节标识或 provisioning blob。
+测试期间发到 iPhone 的验证码没有用于第 7、8 步。文档记录验收结果，不附生成码或令牌。
 
-## 已写入项目
+## Windows 启动
 
-1. `aps/`：导入匹配的客户端证书和 RSA 私钥，验证证书有效期；保持 Apple 服务器 TLS 验证。
-2. APS `apns-security-v3` 长连接：签名认证，获取并保存真实推送令牌，设置连接状态，订阅 `com.apple.idmsauth`。
-3. APS 帧边界和大小限制、通知确认、心跳，以及命令 100 的登录请求和命令 400 的取消事件。
-4. `gsa`：使用 heartbeat token 调用 `postdata`，携带设备名称和推送令牌，读取账号设备状态。
-5. SRP 的 CPD 可绑定推送令牌，并支持用于设备登记的本机登录上下文。
-6. `teardown` 使用上游实际调用的 `defbtn` / `albtn` 动作响应允许或拒绝。
-7. CLI 只处理当前账号的请求，显示验证码前需要用户输入 `allow`，会检查请求是否已取消。
-8. `aps.NativeClient`：通过嵌入的 C# COM 桥接调用本机 Apple 推送服务，订阅及取消订阅仅涉及本连接的 IDMS 主题。
-   桥接进程使用 Windows 自带 PowerShell 的 MTA 模式；账号密码不传给桥接进程，不导出 Apple 的证书或私钥。
-9. 已根据真实通知修复 `aps.alert` 的字符串/对象兼容；普通未处理通知不会中断连接，命令 700 仍明确报错。
+此机器已有完整的已签名 Store 包缓存与依赖：
 
-以上协议传输的本地测试覆盖签名验证、握手、订阅、通知确认、输入截断、证书密钥不匹配和 Apple 拒绝登记的错误解析。
-本地模拟服务不能证明 Apple 接受受信任设备注册。
-命令 700 的 Circle/PAKE 配对流程尚未实现；收到该命令会明确报错，不会冒充已经完成配对。
+```powershell
+.\setup-native-adi.ps1
+.\run-trusted-device.ps1 -Check
+.\run-trusted-device.ps1
+```
 
-## 推送凭据与剩余生成组件
+脚本提示账号密码，密码不回显。首次双重验证默认向绑定手机号发短信。
+登录后可输入：
 
-### 客户端推送证书
+| 输入 | 行为 |
+| --- | --- |
+| `code` | 主动生成本机六位码，不批准任何推送请求 |
+| `allow` | 允许当前未取消的请求，并显示本机验证码 |
+| `deny` | 拒绝当前未取消的请求 |
+| Ctrl+C | 退出监听 |
 
-APS 需要 Apple 签发的 **client push certificate** 和匹配私钥。
-Apple Developer 后台用于向应用发送通知的 APNs provider 证书不是这个凭据。
-仅凭账号密码不能在本项目中产生该证书；普通 anisette provisioning 也没有返回它。
+`code` 不需要存在未处理的通知；`allow` 会检查请求是否已经取消。
+新登录的受信任设备测试可能同时通知账号原有的 iPhone，与首次短信验证使用不同的接口。
 
-已检查的公开 Albert 实现还需要签名的 activation 数据。
-本项目没有嵌入网上公开的共享 FairPlay 私钥，也没有可用的本机签名器；
-证书直连入口支持导入已取得的客户端证书，不声称已实现它的自动签发。
-
-这台 Windows 已有 Apple 的 APS 服务，因而新增 `-native-push` 路径：
-Apple 服务负责自己的客户端凭据和连接，程序只取得令牌及订阅通知，无需导出证书和私钥。
-旧 `ApplePushService.dll` 使用的 `NotificationCenter2` COM 类未对包外程序注册；
-改用安装包已公开注册的 `APSNotificationServer` / `NotificationCenter` 接口后连接及本地回调实测成功。
-
-### ADI 验证码生成
-
-AuthKit 登录请求推送通常包含请求信息和事务编号，不能假定其中有明文六位验证码。
-上游收到请求后调用本机 anisette/ADI provider 的 `get_2fa_code()`。
-
-检查结果：
-
-- `OpenBubbles/clearadi-stub` 的 `gen_2fa_code()`、provisioning 和 OTP 函数均为 `todo!()`。
-- `omnisette` 的默认 `get_2fa_code()` 返回 `MissingLibraries`；SideStore v3 provider 未实现该函数。
-- `Dadoum/Provision` 的 `ADIGetLoginCode` 是 provisioning 状态检查，返回 0 表示已 provisioning。
-  不能把它的 0 格式化成 `000000` 当作验证码。
-- `ani.sidestore.io` 的公开 v3 接口提供认证头和 provisioning，不提供可调用的验证码生成接口。
-- 新查到的 `Dadoum/apple-crates` 定义了真正的六位码调用，区别于 `ADIGetLoginCode` 状态检查。
-  调用已在本机 DLL 上复现：初始化成功，六位码调用返回 `-45019`。未枚举本机其他账号、修改本机 provisioning，或输出验证码。
-
-`aps.CodeFromProcess` 是连接一个已实现的本地生成器的接口，**不是验证码算法的实现**。
-正常收码模式缺少生成器时会报错；显式使用 `-listen-only` 可登记及观察通知，不能允许请求或显示验证码。
-
-## Windows 实验命令
-
-本机原生推送探测，不需要账号密码，不提交设备登记：
+直接调用 CLI：
 
 ```powershell
 go build -o .\bin\trusted-device.exe ./cmd/trusted-device
-.\bin\trusted-device.exe -probe-native-push
+.\bin\trusted-device.exe -native-adi -twofactor sms
 ```
 
-已实测返回令牌长度 32，私有本地 COM 回调通过。这个回调测试不代表远端验证码投递。
+直接调用时凭据通过 `APPLESERVICES_APPLEID` / `APPLESERVICES_PASSWORD` 提供。
+支持 `-dir`、`-adi-dll`、`-python`、`-name` 和 `-listen-for`。
+`-native-adi` 自动启用原生推送，不能同时传外部生成器或推送证书。
+`-check` 检查本地状态、模块哈希、Python 位数/版本与编译器，不访问 Apple。
+沿用已有 `state/device.json`；其他机器先通过普通登录建立状态。
 
-只观察真实通知（沿用已有登录状态与环境变量中的账号密码）：
+## 依赖和模块校验
 
-```powershell
-.\bin\trusted-device.exe -native-push -listen-only -listen-for 2m
+- Windows x64、Go 1.26+、64 位 Python 3.10+、gcc/MinGW。
+- 已安装的 iCloud for Windows；本机实测版本为 15.8.118.0。
+- OpenBubbles Store 包 `OpenBubbles.OpenBubbles`，**1.18.800.0 x64**。
+  Microsoft Store 产品 ID：`9PJMSNSQD0FV`。
+
+项目不分发第三方 DLL，也不自动下载或安装 OpenBubbles。
+其他包路径可用 `setup-native-adi.ps1 -PackagePath 'C:\path\package.msix'`。
+脚本检查完整 MSIX 签名有效、发布者一致、包清单名称/版本/架构一致，
+仅提取唯一的 `rust_lib_bluebubbles.dll` 并校验固定 SHA256：
+
+```text
+ca88e816dda449d7ba24d54a5ed709a2d392daeae28c25a61dcd2e7496e44cfe
 ```
 
-这个命令会登录、向账号提交登记、查询设备状态并监听通知；不会批准登录请求或生成验证码。
-不指定 `-listen-for` 时持续监听，Ctrl+C 退出。桥接退出时取消自己的订阅和回调，不停止 Apple 推送服务。
+本机包签名实测为 Valid。Go 启动前、Python 加载前都再次校验模块哈希；
+原生绑定内容 hash 必须为 `-208244658`。
+公共绑定对应源码版本 `dc276004ac4ee0bd8e7d7e2089da7b94695166c9`。
+其他版本不能直接替换，需要重新核对 ABI 和真实验证码验收。
 
-准备好与登录 anisette 身份一致的真实生成器后，正常收码模式可用 `-native-push -code-provider ...`。
-证书直连模式仍需要真实客户端推送证书、对应私钥和生成器：
+## 实现和状态
 
-```powershell
-go build -o .\bin\trusted-device.exe ./cmd/trusted-device
-.\bin\trusted-device.exe -check `
-  -push-cert 'C:\path\client-push-cert.pem' `
-  -push-key 'C:\path\client-push-key.pem' `
-  -code-provider 'C:\path\adi-code-provider.exe'
-```
+`nativeadi.Client` 同时提供 anisette 认证头和六位码，两者绑定同一个设备标识。
+Python 通过已核对版本的 Flutter Rust Bridge SSE 接口调用实际 provisioning、headers 和
+`get_2fa_code`，处理同步缓冲区、异步回调释放与 Rust 句柄所有权。
+没有把 provisioning 状态检查返回值格式化成验证码。
 
-`-check` 只检查本地输入，不访问 Apple，不证明设备受信任。
-去掉 `-check` 会建立 APS 连接、用环境变量中的账号密码认证、提交登记请求并监听通知。
-账号密码参数使用已有 `APPLESERVICES_APPLEID` / `APPLESERVICES_PASSWORD`，不写进状态文件。
+原生模块的 factory 需要 APS 上下文。项目的独立 Python 进程通过 Winsock IAT shim
+拒绝该模块闲置的 TCP 5223 连接，避免进入额外推送激活；真正的推送由 Apple COM 服务提供。
+该 shim 只作用于当前辅助进程的这个模块，不修改系统防火墙或其他进程，
+不跳过账号认证、许可验证或密码学检查。桥接代码每次在临时目录编译，退出清理。
 
-生成器通过标准输入接收 JSON：`device_id`、Base64 的 `identifier` 和 `adi_pb`。
-它必须返回 JSON：同一 `device_id` 和六位字符串 `code`。不向它传递账号密码或 iCloud 令牌。
-生成器路径必须是绝对路径，执行限时，输出限长，不经过 shell。
+原生 provisioning 会直接打印敏感诊断，加载 DLL 前关闭其 stdout/stderr，
+保留单独 JSON IPC 输出。每个回复校验请求序号、设备身份和验证码格式。
+账号密码不保存，也不继承给 Python、编译器或 APS 子进程。
 
-证书直连模式的 `state/push.json` 含客户端推送私钥、证书和令牌，位于已有 Git 忽略目录。
-原生模式每次从 Apple 服务取得令牌，不把服务持有的证书或私钥保存到该文件。
-收到登录请求后输入 `allow` 才显示验证码；`deny` 拒绝，其他输入忽略。
-程序没有自动批准所有请求，也没有把接收的通知内容写入普通日志。
+APS 支持真实令牌、IDMS 主题、命令 100/400/1200、通知确认和账号过滤。
+原生模式不导出 Apple 推送证书或私钥。
+登记使用带推送令牌的 SRP CPD、heartbeat token 和 `postdata`；
+`allow`/`deny` 通过 `teardown` 发送服务器动作。命令 700 的 Circle/PAKE 尚未实现，收到明确报错。
 
-## 最终验收仍需完成
+敏感本机状态：
 
-1. Apple 接受真实 APS 凭据与推送令牌。
-2. Apple 账号设备页面显示当前安装，且明确允许它接收验证码。
-3. 另一个新的登录会话触发验证码请求。
-4. 本程序收到对应请求并生成验证码，该新会话提交后被 Apple 接受。
-5. 重启后保持相同身份，重新连接仍能完成上述接收。
+- `state/device.json`：稳定标识、序列号、原远端 provisioning；本机路径不使用原远端 blob。
+- `state/session.json`：绑定账号的可信 Cookie。
+- `state/native-adi/hw_info.plist`：本机原生身份与推送状态。
+- `state/native-adi/anisette_test/state.plist`：本机 ADI provisioning。
 
-目前已通过原生令牌、登记请求与一次新登录的真实请求接收。
-账号页面明确的收码能力、生成六位码后被 Apple 接受，以及完整流程重启复验仍未完成。
+保留整个状态目录以便重启复用，不保证迁移到其他机器可用。
+默认 `state/`、`.cache/`、`bin/` 和 Python 字节码已加入 Git 忽略。
+没有恢复钥匙串、读取照片/联系人/iMessage 或删除账号原有设备。
 
-六位码调用的可复现实测工具为 `tools/probe-native-adi.py`。传入本机安装的、已暂存到工作区的 DLL 绝对路径：
+## 验收边界
 
-```powershell
-python .\tools\probe-native-adi.py 'C:\path\CoreADI64.dll'
-```
+- 设备登记被接受，列表存在与登记名称一致的条目；数量此前仍为 3。
+  未验证 Apple 网页显示独立新增设备或明确的受信任标记。
+- 真实推送到达 Windows、本机生成码被新登录接受、iCloud 令牌交换均已通过。
+  本次通过手动 `code`，推送的 `allow` 按钮完整流程还没有验收。
+- Windows 仍依赖 Apple APS 服务及固定第三方原生模块，没有独立实现开源验证码算法。
+- 本机 iCloud 的 `CoreADI64.dll` 六位码接口仍返回 `-45019`；新路径使用另一个实际有效的模块。
+- ClearADI 公共 stub 的函数是占位代码，不能单靠它生成验证码。
+- 尚未验证其他账号或所有 Apple 网页/服务验证流程。
 
-此工具只探测已知接口，不是生成器。当前 DLL 返回 `six_digit_generation_supported=false`，退出码 2。
+`go test ./...`、`go vet ./...`、签名/哈希检查和 CLI 本地检查已通过。
+新增测试覆盖回复身份和请求绑定、错误脱敏、子进程凭据过滤、生成码格式、错误模块拒绝。
+本地测试本身不代替上述真实账号验收。
 
-## 公开依据
+## 依据
 
-- [RustPush 的 APS 与 AuthKit 消息](https://github.com/OpenBubbles/rustpush/blob/master/src/auth.rs)：`IdmsAuthListener`、`com.apple.idmsauth`、命令 100 / 400。
-- [Apple 私有 API 的登记请求](https://github.com/OpenBubbles/apple-private-apis/blob/master/icloud-auth/src/client.rs)：`update_postdata` 与 `teardown`。
-- [登录 CPD 与请求头](https://github.com/OpenBubbles/apple-private-apis/blob/master/icloud-auth/src/anisette.rs)：本机应用上下文与 `ptkn`。
-- [ClearADI 的公开占位实现](https://github.com/OpenBubbles/clearadi-stub/blob/main/src/lib.rs)：验证码生成函数未实现。
-- [ADI provider 能力](https://github.com/OpenBubbles/apple-private-apis/blob/master/omnisette/src/lib.rs)：默认缺少验证码生成能力。
-- [Provision 状态检查](https://github.com/Dadoum/Provision/blob/master/lib/provision/adi.d)：`isMachineProvisioned` 的返回值含义。
-- [SideStore v3 服务](https://github.com/Dadoum/anisette-v3-server/blob/master/source/app.d)：公开的 provisioning 与认证头接口。
-- [OpenBubbles 对允许/拒绝按钮的调用](https://github.com/OpenBubbles/openbubbles-app/blob/rustpush/android/app/src/main/kotlin/com/bluebubbles/messaging/services/rustpush/AuthCodeActivity.kt)：`defbtn` / `albtn`。
-- [ADI 六位码消息与调用编号](https://github.com/Dadoum/apple-crates/blob/master/adi/src/calls.rs)：`Gen2FACodeMessage`、`0x385b2ce8`。
-- [ADI 调用参数序列化](https://github.com/Dadoum/apple-crates/blob/master/adi/src/core_adi.rs)：明文标记、固定长度大端字段和独立输出指针。
-- [ADI 错误含义](https://github.com/Dadoum/apple-crates/blob/master/adi/src/proxy.rs)：`-45019` 是 `InvalidFunctionCode`，区别于未 provisioning 的 `-45061`。
-- 原生 COM 接口来自本机 iCloud 15.8 包中的 `APSDaemon_main.dll` 类型库及 `AppxManifest.xml`，不从未知地址取得 Apple 二进制。
-
-源码用于核对协议字段。没有复制上游共享私钥或声称占位生成器可以工作。
+- [OpenBubbles 公共绑定对应版本](https://github.com/OpenBubbles/openbubbles-app/tree/dc276004ac4ee0bd8e7d7e2089da7b94695166c9/rust)。
+- [RustPush AuthKit](https://github.com/OpenBubbles/rustpush/blob/master/src/auth.rs)。
+- [登记与 teardown](https://github.com/OpenBubbles/apple-private-apis/blob/master/icloud-auth/src/client.rs)。
+- [ClearADI 公共占位实现](https://github.com/OpenBubbles/clearadi-stub/blob/main/src/lib.rs)。
+- [原 CoreADI 六位码调用](https://github.com/Dadoum/apple-crates/blob/master/adi/src/calls.rs)。
+- Windows COM 接口来自本机 iCloud 包类型库与清单；原生模块来自已验证签名的完整 Store 包。
