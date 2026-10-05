@@ -29,7 +29,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (runErr error) {
 	dir := flag.String("dir", "./state", "existing device/session directory")
 	name := flag.String("name", "appleservices", "name announced to Apple")
 	certificatePath := flag.String("push-cert", "", "Apple-issued client push certificate PEM file")
@@ -94,12 +94,7 @@ func run() error {
 	}
 	savedPath := filepath.Join(*dir, "push.json")
 	var pushState aps.State
-	var push interface {
-		Connect(context.Context) error
-		State() aps.State
-		Listen(context.Context, func(aps.Event) error) error
-		Close() error
-	}
+	var push pushTransport
 	if *native {
 		if *certificatePath != "" || *keyPath != "" {
 			return errors.New("native-push cannot be combined with push-cert or push-key")
@@ -162,7 +157,11 @@ func run() error {
 		status.Running, status.PushConnected = false, false
 		status.Authenticated = false
 		if status.State != "verification_required" {
-			status.State = "stopped"
+			if runErr != nil {
+				status.FailureStage, status.State = status.State, "failed"
+			} else {
+				status.State = "stopped"
+			}
 			status.VerificationRequired = false
 		}
 		if err := status.save(*dir); err != nil {
@@ -197,7 +196,7 @@ func run() error {
 		}
 		return err
 	}
-	defer push.Close()
+	defer func() { push.Close() }()
 	status.PushConnected = true
 	status.State = "initializing"
 	if err := status.save(*dir); err != nil {
@@ -402,37 +401,54 @@ func run() error {
 	var pending string
 	events := make(chan aps.Event, 16)
 	errorsCh := make(chan error, 1)
-	go func() {
-		errorsCh <- push.Listen(ctx, func(event aps.Event) error {
-			if event.AccountID != "" && event.AccountID != accountID {
-				return nil
-			}
-			pendingMu.Lock()
-			if event.Command == 400 && pending != event.PreviousTransactionID {
+	listen := func(connection pushTransport) {
+		go func() {
+			errorsCh <- connection.Listen(ctx, func(event aps.Event) error {
+				if event.AccountID != "" && event.AccountID != accountID {
+					return nil
+				}
+				pendingMu.Lock()
+				if event.Command == 400 && pending != event.PreviousTransactionID {
+					pendingMu.Unlock()
+					return nil
+				}
+				if event.Command == 100 {
+					pending = event.TransactionID
+					if panel != nil {
+						panel.SetPending(&control.Pending{ID: requestID(pending), ReceivedAt: time.Now().UTC()})
+					}
+				}
+				if event.Command == 400 && pending == event.PreviousTransactionID {
+					pending = ""
+					if panel != nil {
+						panel.SetPending(nil)
+					}
+				}
 				pendingMu.Unlock()
-				return nil
-			}
-			if event.Command == 100 {
-				pending = event.TransactionID
-				if panel != nil {
-					panel.SetPending(&control.Pending{ID: requestID(pending), ReceivedAt: time.Now().UTC()})
+				select {
+				case events <- event:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
 				}
-			}
-			if event.Command == 400 && pending == event.PreviousTransactionID {
-				pending = ""
-				if panel != nil {
-					panel.SetPending(nil)
-				}
-			}
-			pendingMu.Unlock()
-			select {
-			case events <- event:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		})
+			})
+		}()
+	}
+	listen(push)
+	var reconnectTimer *time.Timer
+	var reconnectTick <-chan time.Time
+	reconnected := make(chan pushConnection)
+	reconnectDelay := 2 * time.Second
+	defer func() {
+		if reconnectTimer != nil {
+			reconnectTimer.Stop()
+		}
 	}()
+	scheduleReconnect := func() {
+		reconnectTimer = time.NewTimer(reconnectDelay)
+		reconnectTick = reconnectTimer.C
+		reconnectDelay = nextPushDelay(reconnectDelay)
+	}
 	var choices <-chan string
 	if !*listenOnly && !*background {
 		inputChoices := make(chan string)
@@ -548,7 +564,58 @@ func run() error {
 			}
 			return ctx.Err()
 		case err := <-errorsCh:
-			return err
+			if ctx.Err() != nil {
+				return nil
+			}
+			push.Close()
+			status.PushConnected, status.PushIssue = false, "reconnecting"
+			pendingMu.Lock()
+			pending = ""
+			if panel != nil {
+				panel.SetPending(nil)
+			}
+			pendingMu.Unlock()
+			if saveErr := status.save(*dir); saveErr != nil {
+				return saveErr
+			}
+			fmt.Fprintln(os.Stderr, "Push connection ended; retaining the authenticated session and retrying:", err)
+			scheduleReconnect()
+		case <-reconnectTick:
+			reconnectTick = nil
+			saved := push.State()
+			go func() {
+				candidate, err := reconnectPush(ctx, saved.Token, func() (pushTransport, error) {
+					if *native {
+						return aps.NewNativeClient()
+					}
+					return aps.NewClient(saved)
+				})
+				select {
+				case reconnected <- pushConnection{client: candidate, err: err}:
+				case <-ctx.Done():
+					if candidate != nil {
+						candidate.Close()
+					}
+				}
+			}()
+		case result := <-reconnected:
+			if result.err != nil {
+				if errors.Is(result.err, errPushTokenChanged) {
+					status.PushIssue = "token_changed"
+				} else {
+					scheduleReconnect()
+				}
+			} else {
+				push = result.client
+				status.PushConnected, status.PushIssue = true, ""
+				status.PushReconnectCount++
+				reconnectDelay = 2 * time.Second
+				listen(push)
+				fmt.Fprintln(os.Stderr, "Push connection restored with the existing token; account session retained.")
+			}
+			if err := status.save(*dir); err != nil {
+				return err
+			}
 		case command := <-panelCommands:
 			if command.Context.Err() != nil {
 				continue
@@ -569,6 +636,13 @@ func run() error {
 				fmt.Fprintln(os.Stderr, "Session renewal failed; retaining the existing connection.")
 			}
 		case event := <-events:
+			if event.Command == 700 {
+				status.PairingUnsupported = true
+				if err := status.save(*dir); err != nil {
+					return err
+				}
+				fmt.Fprintln(os.Stderr, "Circle/PAKE pairing is unsupported; pairing was not completed. Authentication, code generation and reception remain active.")
+			}
 			if event.Command == 1200 {
 				fmt.Fprintln(os.Stderr, "Apple delivered a device-status notification for this account. This does not verify code generation.")
 			}

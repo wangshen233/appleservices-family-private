@@ -43,7 +43,8 @@ func ParseEvent(payload []byte) (Event, error) {
 			return Event{}, errors.New("aps: device-status notification missing account")
 		}
 	case 700:
-		return Event{}, errors.New("aps: Circle/PAKE pairing is required but not implemented")
+		// A pairing request is not an authentication or transport failure.
+		// Deliver it for an explicit capability notice without attempting pairing.
 	default:
 		return Event{}, ErrUnhandledNotice
 	}

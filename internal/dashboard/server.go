@@ -53,6 +53,10 @@ type Status struct {
 	DeviceCount          int       `json:"device_count"`
 	InstallationVisible  bool      `json:"installation_visible"`
 	RefreshCount         int       `json:"refresh_count"`
+	PairingUnsupported   bool      `json:"pairing_unsupported"`
+	PushReconnectCount   int       `json:"push_reconnect_count"`
+	PushIssue            string    `json:"push_issue,omitempty"`
+	FailureStage         string    `json:"failure_stage,omitempty"`
 }
 type view struct {
 	Status       Status           `json:"status"`
@@ -247,7 +251,7 @@ func (s *Server) Start(ctx context.Context, creds credentials) control.Result {
 	go func() {
 		if err := command.Wait(); err != nil {
 			s.mu.Lock()
-			s.message = "后台登录未完成，请检查账号或重新登录"
+			s.message = "后台异常停止，请查看状态并重新连接"
 			s.mu.Unlock()
 		}
 	}()

@@ -65,6 +65,10 @@ type runtimeStatus struct {
 	DeviceCount          int       `json:"device_count"`
 	InstallationVisible  bool      `json:"installation_visible"`
 	RefreshCount         int       `json:"refresh_count"`
+	PairingUnsupported   bool      `json:"pairing_unsupported"`
+	PushReconnectCount   int       `json:"push_reconnect_count"`
+	PushIssue            string    `json:"push_issue,omitempty"`
+	FailureStage         string    `json:"failure_stage,omitempty"`
 }
 
 func (s *runtimeStatus) setDevices(devices []appleservices.AccountDevice, name string) {
