@@ -87,3 +87,30 @@ GrandSlam `init` 返回了可解析的 SRP 挑战；`complete` 请求返回 HTTP
 因此账号密码正确性和实际 iCloud 登录仍未验证，未保存可信会话。
 为避免连续提交被限流的请求，没有继续重试。
 该记录不包含账号、密码、设备标识或 provisioning 数据。
+
+## complete 返回 429 的原因与修复
+
+之前将所有 HTTP 429 直接解释为频率限流不够准确。
+对照近期上游后发现，与实际现象吻合的是 GSA 连接复用兼容问题：
+第一条 `init` 得到响应，第二条 `complete` 在同一条连接上被返回 429。
+
+- [iLoader v2.3.3](https://github.com/nab138/iloader/releases/tag/v2.3.3)：9 月 10 日发布，说明通过关闭 reqwest 连接池缓解 GSA 429。
+- [FindMy.py PR #3](https://github.com/parawanderer/FindMy.py/pull/3)：已合并，包含真实登录复现与连接复用隔离。
+- [后续简化提交 1471a7c](https://github.com/parawanderer/FindMy.py/commit/1471a7c)：按 GSA 主机关闭连接复用，确认桌面平台也受影响。
+
+检查当前代码确认：虽然 HTTP 辅助库每次构造一个新的 `http.Client`，
+它仍把同一个 `Transport` 传给 init / complete，底层连接池因而被共享。
+
+新增仅针对 `gsa.apple.com` 的认证传输：HTTP/1、禁用 keep-alive、每个请求结束后关闭连接。
+其他主机继续使用普通连接池；不更换账号、设备标识、anisette 服务或代理出口。
+Cookie 仍由同一个 CookieJar 保存和传递，TLS 证书验证保持开启。
+
+本地 TLS 回归服务模拟每条连接只能处理一次请求：
+旧连接池复现第二次请求 429；新传输两次均成功，且 complete 仍收到 init 设置的 Cookie。
+测试同时覆盖上游 HTTP/2 支持，确保 GSA 不再复用 HTTP/2 连接。
+
+实际验证保持最早提供的账号密码、同一设备身份和同一代理：
+init / complete 均通过，M2 校验成功，SPD 成功解密，Apple 返回双重验证要求。
+程序已请求受信任设备验证码，目前等待输入。
+这确认本次 429 是连接复用导致的兼容失败；仍不能把其他场景的所有 429 都解释为同一问题。
+尚未完成双重验证和 iCloud delegate 交换，因此不把这一步描述为完整 iCloud 登录成功。

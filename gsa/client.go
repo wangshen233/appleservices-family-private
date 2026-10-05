@@ -61,7 +61,7 @@ func NewClient(anisette AnisetteProvider) *Client {
 	jar, _ := cookiejar.New(nil)
 	return &Client{
 		anisette:  anisette,
-		transport: AppleRootTransport(),
+		transport: newAuthenticationTransport(),
 		cookieJar: jar,
 	}
 }
