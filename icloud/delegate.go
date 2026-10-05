@@ -23,6 +23,7 @@ type DelegateTokens struct {
 }
 
 func FetchDelegateTokens(anisetteHeaders map[string]string, username, adsid, pet string) (DelegateTokens, error) {
+	anisetteHeaders = httpx.NormalizeAnisetteHeaders(anisetteHeaders)
 	body := map[string]any{
 		"apple-id":  username,
 		"delegates": map[string]any{"com.apple.mobileme": map[string]any{}},

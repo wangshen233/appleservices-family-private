@@ -8,10 +8,12 @@ import (
 )
 
 func TestGetHeadersPreservesServiceIdentity(t *testing.T) {
+	legacy := "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>"
+	expected := "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v3/client_info":
-			fmt.Fprint(w, `{"client_info":"test-client","user_agent":"test-agent"}`)
+			fmt.Fprintf(w, `{"client_info":%q,"user_agent":"test-agent"}`, legacy)
 		case "/v3/get_headers":
 			fmt.Fprint(w, `{"result":"Headers","X-Apple-I-MD":"test-md","X-Apple-I-MD-M":"test-mdm"}`)
 		default:
@@ -28,7 +30,10 @@ func TestGetHeadersPreservesServiceIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h["User-Agent"] != "test-agent" || h["X-Mme-Client-Info"] != "test-client" || h["X-Mme-Device-Id"] == "" {
+	if h["User-Agent"] != "test-agent" || h["X-Mme-Client-Info"] != expected || h["X-Mme-Device-Id"] == "" {
 		t.Fatal("lost device identity headers")
+	}
+	if c.albertHeaders(NewState())["X-Mme-Client-Info"] != expected {
+		t.Fatal("provisioning still sends the retired client token")
 	}
 }

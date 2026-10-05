@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Laky-64/appleservices/internal/httpx"
 	"github.com/Laky-64/http"
 )
 
@@ -38,7 +39,7 @@ func NewClient(url string) (*Client, error) {
 	if err := json.Unmarshal(result.Body, &info); err != nil {
 		return nil, err
 	}
-	c.clientInfo, c.userAgent = info.ClientInfo, info.UserAgent
+	c.clientInfo, c.userAgent = httpx.NormalizeClientInfo(info.ClientInfo), info.UserAgent
 	return c, nil
 }
 

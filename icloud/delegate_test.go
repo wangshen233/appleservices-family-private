@@ -23,6 +23,9 @@ func TestDelegateLoginUsesPETAndReturnsICloudToken(t *testing.T) {
 		if r.Header.Get("X-Apple-I-MD") != "test-md" {
 			t.Error("missing anisette header")
 		}
+		if r.Header.Get("X-Mme-Client-Info") != "<test-model> <test-os> <com.apple.AuthKit/1 (com.apple.akd/1.0)>" {
+			t.Error("iCloud delegate exchange still sends retired client token")
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Error(err)
@@ -52,7 +55,10 @@ func TestDelegateLoginUsesPETAndReturnsICloudToken(t *testing.T) {
 	previous := setupBaseURL
 	setupBaseURL = server.URL
 	t.Cleanup(func() { setupBaseURL = previous })
-	tokens, err := FetchDelegateTokens(map[string]string{"X-Apple-I-MD": "test-md"}, "owner@example.test", "test-adsid", "test-pet")
+	tokens, err := FetchDelegateTokens(map[string]string{
+		"X-Apple-I-MD":      "test-md",
+		"x-mme-client-info": "<test-model> <test-os> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>",
+	}, "owner@example.test", "test-adsid", "test-pet")
 	if err != nil {
 		t.Fatal(err)
 	}

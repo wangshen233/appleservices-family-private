@@ -2,6 +2,7 @@ package gsa
 
 import (
 	"fmt"
+	"github.com/Laky-64/appleservices/internal/httpx"
 	"maps"
 	"net/http"
 	"net/url"
@@ -65,7 +66,7 @@ func (c *Client) Snapshot(dsid string, tokens map[string]string) (Session, error
 func NewClientFromSession(anisette AnisetteProvider, sess Session) *Client {
 	c := NewClient(anisette)
 	if sess.AnisetteHeaders != nil {
-		c.cachedAnisetteHeaders = maps.Clone(sess.AnisetteHeaders)
+		c.cachedAnisetteHeaders = httpx.NormalizeAnisetteHeaders(sess.AnisetteHeaders)
 	}
 	for ustr, kvs := range sess.Cookies {
 		u, err := url.Parse(ustr)

@@ -18,6 +18,7 @@ import (
 
 	"github.com/Laky-64/http"
 
+	"github.com/Laky-64/appleservices/internal/httpx"
 	"github.com/Laky-64/appleservices/internal/srp"
 	"howett.net/plist"
 )
@@ -30,6 +31,7 @@ type Client struct {
 	cookieJar             *cookiejar.Jar
 	cachedAnisetteHeaders map[string]string
 	anisetteFetchedAt     time.Time
+	smsPhoneID            int
 }
 
 func (c *Client) anisetteHeaders() (map[string]string, error) {
@@ -44,9 +46,9 @@ func (c *Client) refreshAnisetteHeaders() (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gsa: anisette headers: %w", err)
 	}
-	c.cachedAnisetteHeaders = h
+	c.cachedAnisetteHeaders = httpx.NormalizeAnisetteHeaders(h)
 	c.anisetteFetchedAt = time.Now()
-	return h, nil
+	return c.cachedAnisetteHeaders, nil
 }
 
 func (c *Client) AnisetteHeaders() (map[string]string, error) {
@@ -113,11 +115,15 @@ func (c *Client) doRequest(request map[string]any) (map[string]any, error) {
 		http.CookieJar(c.cookieJar),
 		http.Timeout(30*time.Second),
 	)
+	if result != nil && result.StatusCode != 200 {
+		op, _ := request["o"].(string)
+		return nil, &AuthenticationError{Operation: op, HTTPStatus: result.StatusCode}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("gsa: request failed: %w", err)
 	}
-	if result.StatusCode != 200 {
-		return nil, fmt.Errorf("gsa: request status %d", result.StatusCode)
+	if result == nil {
+		return nil, errors.New("gsa: request returned no response")
 	}
 
 	var decoded map[string]any
@@ -155,12 +161,17 @@ func (c *Client) buildCPD() (map[string]any, error) {
 		"svct":      "iCloud",
 	}
 	for k, v := range h {
-		cpd[k] = v
+		if !strings.EqualFold(k, "User-Agent") {
+			cpd[k] = v
+		}
 	}
 	return cpd, nil
 }
 
 func derivePasswordKey(password string, protocol string, salt []byte, iterations int) ([]byte, error) {
+	if protocol != "s2k" && protocol != "s2k_fo" {
+		return nil, fmt.Errorf("gsa: unsupported SRP protocol %q", protocol)
+	}
 	p1 := sha256.Sum256([]byte(password))
 	var p2 []byte
 	if protocol == "s2k_fo" {
@@ -220,6 +231,7 @@ func decryptSPD(sessionKey, spd []byte) (map[string]any, error) {
 }
 
 func (c *Client) Login(username, password string) (*LoginResult, error) {
+	c.smsPhoneID = 0
 	params := srp.NewParams()
 	client := srp.NewClient(params, username)
 
@@ -241,17 +253,8 @@ func (c *Client) Login(username, password string) (*LoginResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gsa: init request: %w", err)
 	}
-	initStatus, _ := initResp["Status"].(map[string]any)
-	if initStatus == nil {
-		return nil, errors.New("gsa: init response missing Status")
-	}
-	ec, ok := asInt64(initStatus["ec"])
-	if !ok {
-		return nil, errors.New("gsa: could not parse ec/i as integer")
-	}
-	if ec != 0 {
-		em, _ := initStatus["em"].(string)
-		return nil, fmt.Errorf("gsa: init rejected, ec=%v em=%q", ec, em)
+	if _, err := checkStatus(initResp, "init", ""); err != nil {
+		return nil, err
 	}
 
 	protocol, _ := initResp["sp"].(string)
@@ -292,17 +295,9 @@ func (c *Client) Login(username, password string) (*LoginResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gsa: complete request: %w", err)
 	}
-	status, _ := completeResp["Status"].(map[string]any)
-	if status == nil {
-		return nil, errors.New("gsa: complete response missing Status")
-	}
-	completeEC, ok := asInt64(status["ec"])
-	if !ok {
-		return nil, errors.New("gsa: could not parse ec/i as integer")
-	}
-	if completeEC != 0 {
-		em, _ := status["em"].(string)
-		return nil, fmt.Errorf("gsa: complete rejected, ec=%v em=%q (wrong password or account issue)", completeEC, em)
+	status, err := checkStatus(completeResp, "complete", protocol)
+	if err != nil {
+		return nil, err
 	}
 
 	m2, _ := completeResp["M2"].([]byte)
@@ -322,6 +317,9 @@ func (c *Client) Login(username, password string) (*LoginResult, error) {
 	}
 
 	au, _ := status["au"].(string)
+	if au != "" && au != "trustedDeviceSecondaryAuth" && au != "secondaryAuth" {
+		return nil, fmt.Errorf("gsa: unsupported authentication continuation %q", au)
+	}
 	needsTwoFactor := au == "trustedDeviceSecondaryAuth" || au == "secondaryAuth"
 
 	return &LoginResult{NeedsTwoFactor: needsTwoFactor, TwoFactorMethod: au, SessionPayload: sessionPayload}, nil
