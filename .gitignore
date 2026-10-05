@@ -1,0 +1,7 @@
+.idea
+.claude
+.cache/
+backups/
+bin/
+state/
+*.exe

@@ -1,0 +1,337 @@
+package ckks
+
+import (
+	"bytes"
+	"crypto/ecdsa"
+	"encoding/base64"
+	"fmt"
+	"sync"
+	"time"
+
+	"howett.net/plist"
+
+	"github.com/Laky-64/appleservices/cloudkit"
+	"github.com/Laky-64/appleservices/internal/protobuf"
+	"github.com/Laky-64/appleservices/keychain"
+	"github.com/Laky-64/appleservices/octagon"
+)
+
+type Vault struct {
+	ck            *cloudkit.Client
+	sponsorEnc    *ecdsa.PrivateKey
+	sponsorPeerID string
+
+	mu    sync.Mutex
+	zones map[string]*zoneKeys
+}
+
+type classKeyInfo struct {
+	key  []byte
+	uuid string
+}
+
+type zoneKeys struct {
+	tlk       []byte
+	classKeys [][]byte
+	classes   map[string]classKeyInfo
+}
+
+func OpenVault(ck *cloudkit.Client, sponsorEnc *ecdsa.PrivateKey, sponsorPeerID string) *Vault {
+	return &Vault{
+		ck:            ck,
+		sponsorEnc:    sponsorEnc,
+		sponsorPeerID: sponsorPeerID,
+		zones:         map[string]*zoneKeys{},
+	}
+}
+
+func (v *Vault) DeleteRecords(view string, refs []keychain.DeletedRef) ([]cloudkit.SaveResult, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	reqs := make([][]byte, len(refs))
+	for i, ref := range refs {
+		reqs[i] = EncodeRecordDelete(ref.RecordName, view, v.ck.UserID(), ref.RecordEtag)
+	}
+	return v.ck.RecordDeleteBatch(reqs)
+}
+
+func (v *Vault) MoveRecord(view, recordName, newAgrp string) (cloudkit.SaveResult, error) {
+	items, err := v.Items(view)
+	if err != nil {
+		return cloudkit.SaveResult{}, err
+	}
+	return v.MoveRecordIn(view, items, recordName, newAgrp)
+}
+
+func (v *Vault) MoveRecordIn(view string, items []keychain.Item, recordName, newAgrp string) (cloudkit.SaveResult, error) {
+	var target *keychain.Item
+	for i := range items {
+		if items[i].Name == recordName {
+			target = &items[i]
+			break
+		}
+	}
+	if target == nil {
+		return cloudkit.SaveResult{}, fmt.Errorf("ckks: record %q not found in view %q", recordName, view)
+	}
+
+	alreadyMoved := false
+	for i := range items {
+		o := &items[i]
+		if o.Agrp == newAgrp && o.Class == target.Class && o.Srvr == target.Srvr &&
+			o.Acct == target.Acct && bytes.Equal(o.Data, target.Data) {
+			alreadyMoved = true
+			break
+		}
+	}
+
+	if !alreadyMoved {
+		attrs := make(map[string]any, len(target.Attrs))
+		for k, val := range target.Attrs {
+			attrs[k] = val
+		}
+		attrs["agrp"] = newAgrp
+		attrs["mdat"] = time.Now().UTC()
+		delete(attrs, "sha1")
+		blob, err := plist.Marshal(attrs, plist.BinaryFormat)
+		if err != nil {
+			return cloudkit.SaveResult{}, fmt.Errorf("ckks: re-encode moved item: %w", err)
+		}
+		if _, sr, err := v.AddItem(view, blob); err != nil {
+			return sr, fmt.Errorf("ckks: move record (create in %q): %w", newAgrp, err)
+		}
+	}
+	results, err := v.DeleteRecords(view, []keychain.DeletedRef{{RecordName: recordName, RecordEtag: target.Etag}})
+	if err != nil {
+		return cloudkit.SaveResult{}, fmt.Errorf("ckks: move record (delete original %q): %w", recordName, err)
+	}
+	sr := results[0]
+	if sr.Code != 1 {
+		return sr, fmt.Errorf("ckks: move record (delete original %q): %w", recordName, &cloudkit.SaveError{SaveResult: sr})
+	}
+	return sr, nil
+}
+
+const maxSyncPages = 100
+
+func (v *Vault) fetchZoneRecords(view string) ([]Record, error) {
+	var out []Record
+	index := map[string]int{}
+	var token []byte
+	for page := 0; page < maxSyncPages; page++ {
+		body, err := v.ck.RecordSyncZoneSince(view, token)
+		if err != nil {
+			return nil, fmt.Errorf("ckks: fetch view %q: %w", view, err)
+		}
+		records, err := ParseZone(body)
+		if err != nil {
+			return nil, fmt.Errorf("ckks: parse view %q: %w", view, err)
+		}
+		added := 0
+		for _, r := range records {
+			if r.Name != "" {
+				if i, ok := index[r.Name]; ok {
+					out[i] = r
+					continue
+				}
+				index[r.Name] = len(out)
+			}
+			out = append(out, r)
+			added++
+		}
+
+		next := cloudkit.SyncContinuationToken(body)
+		status := cloudkit.SyncStatus(body)
+		if status == cloudkit.SyncNoPendingChanges || next == nil {
+			break
+		}
+		if page > 0 && added == 0 {
+			break
+		}
+		token = next
+	}
+	return out, nil
+}
+
+func (v *Vault) Items(view string) ([]keychain.Item, error) {
+	records, err := v.fetchZoneRecords(view)
+	if err != nil {
+		return nil, err
+	}
+
+	keys, err := v.zoneKeysFor(view, records)
+	if err != nil {
+		return nil, err
+	}
+
+	var items []keychain.Item
+	for _, rec := range records {
+		if rec.Type != "item" {
+			continue
+		}
+		item, err := decryptItemRecord(rec, keys.classKeys)
+		if err != nil {
+			return nil, fmt.Errorf("ckks: item %q: %w", rec.Name, err)
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (v *Vault) zoneKeysFor(view string, records []Record) (*zoneKeys, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if zk, ok := v.zones[view]; ok {
+		return zk, nil
+	}
+
+	tlk, err := v.unwrapTLK(records)
+	if err != nil {
+		return nil, err
+	}
+	classKeys, classes, err := deriveClassKeys(records, tlk)
+	if err != nil {
+		return nil, err
+	}
+	zk := &zoneKeys{tlk: tlk, classKeys: classKeys, classes: classes}
+	v.zones[view] = zk
+	return zk, nil
+}
+
+func (v *Vault) unwrapTLK(records []Record) ([]byte, error) {
+	for _, rec := range records {
+		if rec.Type != "tlkshare" {
+			continue
+		}
+		if string(rec.Fields["receiver"].Bytes) != v.sponsorPeerID {
+			continue
+		}
+		blob, err := extractECIES(string(rec.Fields["wrappedkey"].Bytes))
+		if err != nil {
+			return nil, fmt.Errorf("ckks: tlkshare for sponsor: %w", err)
+		}
+		ckksKey, err := octagon.UnwrapECIES(v.sponsorEnc, blob)
+		if err != nil {
+			return nil, fmt.Errorf("ckks: unwrap TLKShare ECIES: %w", err)
+		}
+		return tlkKeyFromCKKSKey(ckksKey)
+	}
+	return nil, fmt.Errorf("ckks: no TLKShare for sponsor peer %q", v.sponsorPeerID)
+}
+
+func tlkKeyFromCKKSKey(pt []byte) ([]byte, error) {
+	if fields, err := protobuf.ReadFields(pt); err == nil {
+		for _, f := range fields {
+			if f.Number == 4 && f.WireType == protobuf.WireBytes && len(f.Bytes) == KeyLen {
+				return f.Bytes, nil
+			}
+		}
+	}
+	if len(pt) == KeyLen {
+		return pt, nil
+	}
+	return nil, fmt.Errorf("ckks: CKKSKey has no 64-byte key at field 4 (plaintext %dB)", len(pt))
+}
+
+func deriveClassKeys(records []Record, tlk []byte) (classKeys [][]byte, classes map[string]classKeyInfo, err error) {
+	classes = map[string]classKeyInfo{}
+	for _, rec := range records {
+		if rec.Type != "synckey" {
+			continue
+		}
+		class := string(rec.Fields["class"].Bytes)
+		if class != "classA" && class != "classC" {
+			continue
+		}
+		wrapped, err := base64.StdEncoding.DecodeString(string(rec.Fields["wrappedkey"].Bytes))
+		if err != nil {
+			return nil, nil, fmt.Errorf("ckks: %s synckey wrappedkey base64: %w", class, err)
+		}
+		key, err := UnwrapKey(tlk, wrapped)
+		if err != nil {
+			return nil, nil, fmt.Errorf("ckks: unwrap %s class key: %w", class, err)
+		}
+		classKeys = append(classKeys, key)
+		if _, ok := classes[class]; !ok {
+			classes[class] = classKeyInfo{key: key, uuid: rec.Name}
+		}
+	}
+	if len(classKeys) == 0 {
+		return nil, nil, fmt.Errorf("ckks: no class keys in zone")
+	}
+	return classKeys, classes, nil
+}
+
+func decryptItemRecord(rec Record, classKeys [][]byte) (keychain.Item, error) {
+	wrapped, err := base64.StdEncoding.DecodeString(string(rec.Fields["wrappedkey"].Bytes))
+	if err != nil {
+		return keychain.Item{}, fmt.Errorf("wrappedkey base64: %w", err)
+	}
+	itemKey, err := selectItemKey(classKeys, wrapped)
+	if err != nil {
+		return keychain.Item{}, err
+	}
+
+	aad, err := buildItemAAD(rec)
+	if err != nil {
+		return keychain.Item{}, err
+	}
+	padded, err := DecryptItem(itemKey, rec.Fields["data"].Bytes, aad)
+	if err != nil {
+		return keychain.Item{}, fmt.Errorf("decrypt: %w", err)
+	}
+	item, err := parseItemPlist(trimPadding(padded))
+	if err != nil {
+		return keychain.Item{}, err
+	}
+	item.Name = rec.Name
+	item.Etag = rec.Etag
+	return item, nil
+}
+
+func selectItemKey(classKeys [][]byte, wrapped []byte) ([]byte, error) {
+	for _, ck := range classKeys {
+		if key, err := UnwrapKey(ck, wrapped); err == nil {
+			return key, nil
+		}
+	}
+	return nil, fmt.Errorf("no class key unwraps the per-item key")
+}
+
+func trimPadding(b []byte) []byte {
+	n := len(b)
+	for n > 0 && b[n-1] == 0x00 {
+		n--
+	}
+	if n > 0 && b[n-1] == 0x80 {
+		n--
+	}
+	return b[:n]
+}
+
+func parseItemPlist(data []byte) (keychain.Item, error) {
+	var doc map[string]any
+	if _, err := plist.Unmarshal(data, &doc); err != nil {
+		return keychain.Item{}, fmt.Errorf("attribute plist: %w", err)
+	}
+	item := keychain.Item{
+		Class: asString(doc["class"]),
+		Agrp:  asString(doc["agrp"]),
+		Srvr:  asString(doc["srvr"]),
+		Acct:  asString(doc["acct"]),
+		Labl:  asString(doc["labl"]),
+		Attrs: doc,
+	}
+	if d, ok := doc["v_Data"].([]byte); ok {
+		item.Data = d
+	}
+	return item, nil
+}
+
+func asString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
