@@ -88,6 +88,7 @@ func (c *Client) SubmitTrustedDeviceCode(dsid, idmsToken, code string) error {
 			return err
 		}
 	}
+	c.collectVerifiedTokens(result.Headers)
 	return nil
 }
 
@@ -110,15 +111,14 @@ type smsSubmitBody struct {
 	SecurityCode securityCodeBody `json:"securityCode"`
 }
 
-const idmsaBaseURL = "https://idmsa.apple.com/appleauth"
-
 var bootArgsScriptRe = regexp.MustCompile(`(?is)<script\b[^>]*\bclass\s*=\s*["'][^"']*\bboot_args\b[^"']*["'][^>]*>(.*?)</script\s*>`)
 
 type bootArgs struct {
 	TrustedPhoneNumbers []phoneNumberID `json:"trustedPhoneNumbers"`
 	Direct              struct {
 		PhoneNumberVerification struct {
-			TrustedPhoneNumber struct {
+			TrustedPhoneNumbers []phoneNumberID `json:"trustedPhoneNumbers"`
+			TrustedPhoneNumber  struct {
 				ID int `json:"id"`
 			} `json:"trustedPhoneNumber"`
 		} `json:"phoneNumberVerification"`
@@ -144,9 +144,10 @@ func (c *Client) fetchTrustedPhoneID(dsid, idmsToken string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("gsa: fetch boot_args page: %w", err)
 	}
-	if result.StatusCode != 200 {
+	if result.StatusCode != 200 && result.StatusCode != 201 {
 		return 0, fmt.Errorf("gsa: fetch boot_args page: status %d", result.StatusCode)
 	}
+	c.smsCodeAlreadySent = result.StatusCode == 201
 
 	return parseTrustedPhoneID(result.Body)
 }
@@ -171,6 +172,11 @@ func parseTrustedPhoneID(body []byte) (int, error) {
 			return phone.ID, nil
 		}
 	}
+	for _, phone := range args.Direct.PhoneNumberVerification.TrustedPhoneNumbers {
+		if phone.ID > 0 {
+			return phone.ID, nil
+		}
+	}
 	return 0, errors.New("gsa: auth response missing trusted phone number id")
 }
 
@@ -178,6 +184,10 @@ func (c *Client) RequestSMSCode(dsid, idmsToken string) error {
 	phoneID, err := c.fetchTrustedPhoneID(dsid, idmsToken)
 	if err != nil {
 		return err
+	}
+	if c.smsCodeAlreadySent {
+		c.smsPhoneID = phoneID
+		return nil
 	}
 
 	headers, err := c.twoFactorHeaders(dsid, idmsToken)
@@ -190,8 +200,9 @@ func (c *Client) RequestSMSCode(dsid, idmsToken string) error {
 	if err != nil {
 		return fmt.Errorf("gsa: encode sms request: %w", err)
 	}
+	headers["Accept"] = "application/json"
 
-	result, err := http.ExecuteRequest(idmsaBaseURL+"/auth/verify/phone",
+	result, err := http.ExecuteRequest(gsaBaseURL+"/auth/verify/phone",
 		http.Method("PUT"),
 		http.Headers(headers),
 		http.Body(body),
@@ -233,8 +244,9 @@ func (c *Client) SubmitSMSCode(dsid, idmsToken, code string) error {
 	if err != nil {
 		return fmt.Errorf("gsa: encode sms submit: %w", err)
 	}
+	headers["Accept"] = "application/json"
 
-	result, err := http.ExecuteRequest(idmsaBaseURL+"/auth/verify/phone/securitycode",
+	result, err := http.ExecuteRequest(gsaBaseURL+"/auth/verify/phone/securitycode",
 		http.Method("POST"),
 		http.Headers(headers),
 		http.Body(body),
@@ -248,5 +260,6 @@ func (c *Client) SubmitSMSCode(dsid, idmsToken, code string) error {
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
 		return fmt.Errorf("gsa: submit sms code: status %d", result.StatusCode)
 	}
+	c.collectVerifiedTokens(result.Headers)
 	return nil
 }

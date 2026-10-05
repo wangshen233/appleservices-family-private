@@ -26,8 +26,8 @@ func (c *Client) requestURLs() []string {
 		gsaBaseURL + "/grandslam/GsService2",
 		gsaBaseURL + "/auth/verify/trusteddevice",
 		gsaBaseURL + "/grandslam/GsService2/validate",
-		idmsaBaseURL + "/auth/verify/phone",
-		idmsaBaseURL + "/auth/verify/phone/securitycode",
+		gsaBaseURL + "/auth/verify/phone",
+		gsaBaseURL + "/auth/verify/phone/securitycode",
 	}
 }
 

@@ -172,6 +172,19 @@ func (l *Login) SubmitCode(method TwoFactorMethod, code string) error {
 	if err != nil {
 		return fmt.Errorf("appleservices: submit code: %w", err)
 	}
+	if verified, ok := l.backend.(interface{ VerifiedLoginResult() *gsa.LoginResult }); ok {
+		if result := verified.VerifiedLoginResult(); result != nil {
+			if result.NeedsTwoFactor || spdString(result.SessionPayload, "adsid") != l.adsid {
+				return errors.New("appleservices: verification returned an invalid account session")
+			}
+			if _, err := icloud.PETFromSPD(result.SessionPayload); err != nil {
+				return err
+			}
+			l.result = result
+			l.needsTwoFactor = false
+			return l.persistDevice()
+		}
+	}
 	if err := l.authenticate(); err != nil {
 		return err
 	}

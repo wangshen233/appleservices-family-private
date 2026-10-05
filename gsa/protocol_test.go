@@ -131,6 +131,7 @@ func TestTrustedDeviceChecksPlistErrorWithHTTP200(t *testing.T) {
 func TestSMSMetadataFormats(t *testing.T) {
 	for _, body := range []string{
 		`{"trustedPhoneNumbers":[{"id":7}]}`,
+		`{"direct":{"phoneNumberVerification":{"trustedPhoneNumbers":[{"id":7}]}}}`,
 		`{"direct":{"phoneNumberVerification":{"trustedPhoneNumber":{"id":7}}}}`,
 		`<script type="text/javascript" class="boot_args">{"direct":{"phoneNumberVerification":{"trustedPhoneNumber":{"id":7}}}}</script>`,
 		`<SCRIPT class='other boot_args extra'>{"trustedPhoneNumbers":[{"id":7}]}</SCRIPT>`,
@@ -149,6 +150,9 @@ func TestSMSSubmitUsesTheRequestedPhone(t *testing.T) {
 	c := NewClient(headerProvider{})
 	discoveries := 0
 	c.transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Hostname() != "gsa.apple.com" {
+			t.Error("SMS verification used a different authentication host")
+		}
 		if r.Method == "GET" && r.URL.Path == "/auth" {
 			discoveries++
 			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"trustedPhoneNumbers":[{"id":7}]}`))}, nil

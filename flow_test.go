@@ -230,3 +230,37 @@ func TestSessionSaveFailureDoesNotReturnSuccess(t *testing.T) {
 		t.Fatal("reported session saved after write failure")
 	}
 }
+
+type verifiedBackend struct{ *fakeBackend }
+
+func (b *verifiedBackend) VerifiedLoginResult() *gsa.LoginResult {
+	if len(b.submits) == 0 {
+		return nil
+	}
+	return testResult(false)
+}
+
+func TestIssuedVerificationPETAvoidsAnotherChallenge(t *testing.T) {
+	s := &memoryStore{}
+	b := &verifiedBackend{&fakeBackend{results: []*gsa.LoginResult{testResult(true)}}}
+	opts := testOptions(b.fakeBackend, testDelegate)
+	opts = append(opts, func(o *options) {
+		o.newBackend = func(gsa.AnisetteProvider, *gsa.Session) loginBackend { return b }
+	})
+	l, err := BeginLogin(Credentials{"owner@example.test", "test-password"}, s, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.SubmitCode(SMS, "123456"); err != nil {
+		t.Fatal(err)
+	}
+	if l.NeedsTwoFactor() || b.calls != 1 {
+		t.Fatal("restarted password authentication despite an issued PET")
+	}
+	if _, err := l.Client(); err != nil {
+		t.Fatal(err)
+	}
+	if s.saves != 1 {
+		t.Fatal("verified header session did not complete iCloud login")
+	}
+}

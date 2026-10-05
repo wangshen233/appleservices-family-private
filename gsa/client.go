@@ -32,6 +32,9 @@ type Client struct {
 	cachedAnisetteHeaders map[string]string
 	anisetteFetchedAt     time.Time
 	smsPhoneID            int
+	smsCodeAlreadySent    bool
+	loginPayload          map[string]any
+	verifiedTokens        map[string]string
 }
 
 func (c *Client) anisetteHeaders() (map[string]string, error) {
@@ -232,6 +235,9 @@ func decryptSPD(sessionKey, spd []byte) (map[string]any, error) {
 
 func (c *Client) Login(username, password string) (*LoginResult, error) {
 	c.smsPhoneID = 0
+	c.smsCodeAlreadySent = false
+	c.verifiedTokens = nil
+	c.loginPayload = nil
 	params := srp.NewParams()
 	client := srp.NewClient(params, username)
 
@@ -321,6 +327,7 @@ func (c *Client) Login(username, password string) (*LoginResult, error) {
 		return nil, fmt.Errorf("gsa: unsupported authentication continuation %q", au)
 	}
 	needsTwoFactor := au == "trustedDeviceSecondaryAuth" || au == "secondaryAuth"
+	c.loginPayload = sessionPayload
 
 	return &LoginResult{NeedsTwoFactor: needsTwoFactor, TwoFactorMethod: au, SessionPayload: sessionPayload}, nil
 }
