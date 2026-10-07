@@ -39,6 +39,14 @@ type Server struct {
 	mu        sync.Mutex
 	launching bool
 	message   string
+	// accounts holds every registered account. The legacy single-account
+	// fields below address the account whose directory is Config.Dir, so the
+	// original one-account behaviour and its tests keep working unchanged.
+	accounts   []*Account
+	accountsMu sync.Mutex
+	// registryNote reports why the account list could not be loaded, so a
+	// failure is surfaced instead of silently presenting an empty list.
+	registryNote string
 }
 type Status struct {
 	PID                  int       `json:"pid"`
@@ -68,6 +76,8 @@ type view struct {
 	Launching    bool             `json:"launching"`
 	Message      string           `json:"message"`
 	Account      string           `json:"account"`
+	Accounts     []AccountView    `json:"accounts,omitempty"`
+	Selected     string           `json:"selected,omitempty"`
 }
 type credentials struct {
 	AppleID   string `json:"apple_id"`
@@ -86,9 +96,152 @@ func New(config Config) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{config: config, listener: listener, token: hex.EncodeToString(key)}
+	if entries, err := loadRegistry(config.Dir, config.Dir); err != nil {
+		// Surfaced rather than swallowed: an unreadable registry previously
+		// made the panel look like it had no accounts at all.
+		s.registryNote = err.Error()
+	} else {
+		for _, entry := range entries {
+			s.accounts = append(s.accounts, &Account{ID: entry.ID, Name: entry.Name, AppleID: entry.AppleID, Dir: entry.Dir, CreatedAt: entry.CreatedAt})
+		}
+	}
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 100 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	return s, nil
 }
+
+// lookup resolves one account by id. An empty id selects the account whose
+// directory is the server's own, falling back to the first registered account
+// (a migrated install no longer has any account living in the root directory).
+func (s *Server) lookup(id string) *Account {
+	s.accountsMu.Lock()
+	defer s.accountsMu.Unlock()
+	if id == "" {
+		for _, account := range s.accounts {
+			if filepath.Clean(account.Dir) == filepath.Clean(s.config.Dir) {
+				return account
+			}
+		}
+		if len(s.accounts) > 0 {
+			return s.accounts[0]
+		}
+		return nil
+	}
+	for _, account := range s.accounts {
+		if account.ID == id {
+			return account
+		}
+	}
+	return nil
+}
+
+// listAccounts returns every registered account with its live status.
+func (s *Server) listAccounts(ctx context.Context) []AccountView {
+	s.accountsMu.Lock()
+	accounts := append([]*Account(nil), s.accounts...)
+	s.accountsMu.Unlock()
+	out := make([]AccountView, 0, len(accounts))
+	for _, account := range accounts {
+		status := s.accountStatus(account)
+		item := AccountView{ID: account.ID, Name: account.Name, Account: maskAccount(account.AppleID),
+			State: status.State, Running: status.Running, Authenticated: status.Authenticated}
+		account.mu.Lock()
+		if account.message != "" {
+			item.Message = account.message
+		}
+		account.mu.Unlock()
+		out = append(out, item)
+	}
+	return out
+}
+
+// addAccount registers a new account in its own directory. It never reuses or
+// overwrites an existing account's directory or credentials.
+func (s *Server) addAccount(ctx context.Context, creds credentials) (control.Result, string) {
+	if strings.TrimSpace(creds.AppleID) == "" || creds.Password == "" {
+		return control.Result{Message: "请输入 Apple 账户和密码"}, ""
+	}
+	s.accountsMu.Lock()
+	requested := strings.TrimSpace(creds.AppleID)
+	requestedName := strings.SplitN(requested, "@", 2)[0]
+	for _, account := range s.accounts {
+		sameID := account.AppleID != "" && strings.EqualFold(account.AppleID, requested)
+		// A migrated account may carry only a display name, so match on that
+		// too rather than registering the same login twice under a new slug.
+		sameName := account.AppleID == "" && account.Name != "" && strings.EqualFold(account.Name, requestedName)
+		if sameID || sameName {
+			id := account.ID
+			s.accountsMu.Unlock()
+			return control.Result{Message: "该账号已在列表中，请直接选择它"}, id
+		}
+	}
+	entries := make([]*registryEntry, 0, len(s.accounts)+1)
+	for _, account := range s.accounts {
+		entries = append(entries, &registryEntry{ID: account.ID, Name: account.Name, AppleID: account.AppleID, Dir: account.Dir, CreatedAt: account.CreatedAt})
+	}
+	id, dir, err := newAccountDir(s.config.Dir, entries)
+	if err != nil {
+		s.accountsMu.Unlock()
+		return control.Result{Message: err.Error()}, ""
+	}
+	// The worker refuses a directory without a provisioned device, so the new
+	// account inherits this machine's ADI identity before it is started.
+	if err := provisionDevice(s.config.Dir, dir, entries); err != nil {
+		s.accountsMu.Unlock()
+		return control.Result{Message: err.Error()}, ""
+	}
+	entry := &registryEntry{ID: id, Name: strings.SplitN(creds.AppleID, "@", 2)[0], AppleID: strings.TrimSpace(creds.AppleID), Dir: dir}
+	entries = append(entries, entry)
+	if err := saveRegistry(s.config.Dir, entries); err != nil {
+		s.accountsMu.Unlock()
+		return control.Result{Message: "无法保存账号列表"}, ""
+	}
+	account := &Account{ID: entry.ID, Name: entry.Name, AppleID: entry.AppleID, Dir: entry.Dir}
+	s.accounts = append(s.accounts, account)
+	s.accountsMu.Unlock()
+	result := s.startAccount(ctx, account, creds)
+	return result, id
+}
+
+// removeAccount stops one account and unregisters it. Its directory is kept on
+// disk so its device identity is not destroyed by an accidental click.
+func (s *Server) removeAccount(ctx context.Context, id string) control.Result {
+	s.accountsMu.Lock()
+	var target *Account
+	remaining := make([]*registryEntry, 0, len(s.accounts))
+	for _, account := range s.accounts {
+		if account.ID == id {
+			target = account
+			continue
+		}
+		remaining = append(remaining, &registryEntry{ID: account.ID, Name: account.Name, AppleID: account.AppleID, Dir: account.Dir, CreatedAt: account.CreatedAt})
+	}
+	s.accountsMu.Unlock()
+	if target == nil {
+		return control.Result{Message: "账号不存在"}
+	}
+	if err := s.stopIn(ctx, target.Dir); err != nil {
+		return control.Result{Message: "请先停止该账号的后台"}
+	}
+	if err := saveRegistry(s.config.Dir, remaining); err != nil {
+		return control.Result{Message: "无法保存账号列表"}
+	}
+	s.accountsMu.Lock()
+	s.accounts = nil
+	for _, entry := range remaining {
+		s.accounts = append(s.accounts, &Account{ID: entry.ID, Name: entry.Name, AppleID: entry.AppleID, Dir: entry.Dir, CreatedAt: entry.CreatedAt})
+	}
+	s.accountsMu.Unlock()
+	return control.Result{OK: true, Message: "已从列表移除，设备身份仍保留在 accounts/" + target.ID}
+}
+
+func maskAccount(appleID string) string {
+	pieces := strings.SplitN(appleID, "@", 2)
+	if len(pieces) != 2 || pieces[0] == "" {
+		return appleID
+	}
+	return pieces[0][:1] + "***@" + pieces[1]
+}
+
 func (s *Server) URL() string { return "http://" + s.listener.Addr().String() }
 func (s *Server) Serve(ctx context.Context) error {
 	go func() { <-ctx.Done(); s.http.Close() }()
@@ -98,9 +251,23 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	return err
 }
-func (s *Server) readStatus() Status {
+// accountStatus reads one account's worker state. Each account has its own
+// runtime.json in its own directory, so one account's worker can never be
+// mistaken for another's.
+func (s *Server) accountStatus(account *Account) Status {
 	var status Status
-	data, _ := os.ReadFile(filepath.Join(s.config.Dir, "runtime.json"))
+	if account == nil {
+		return status
+	}
+	return s.readStatusFrom(account.Dir)
+}
+
+// readStatus reads the server's own state directory.
+func (s *Server) readStatus() Status { return s.readStatusFrom(s.config.Dir) }
+
+func (s *Server) readStatusFrom(dir string) Status {
+	var status Status
+	data, _ := os.ReadFile(filepath.Join(dir, "runtime.json"))
 	json.Unmarshal(data, &status)
 	if !status.Running || !s.owns(status.PID) {
 		status.Running = false
@@ -171,9 +338,11 @@ func (s *Server) controlAlive(pid int) bool {
 	}
 	return json.Unmarshal(view.Status, &status) == nil && status.PID == pid && status.Running
 }
-func (s *Server) record() (control.Record, error) {
+func (s *Server) record() (control.Record, error) { return s.recordFor(s.config.Dir) }
+
+func (s *Server) recordFor(dir string) (control.Record, error) {
 	var record control.Record
-	data, err := os.ReadFile(filepath.Join(s.config.Dir, "control.json"))
+	data, err := os.ReadFile(filepath.Join(dir, "control.json"))
 	if err != nil {
 		return record, errors.New("后台尚未就绪")
 	}
@@ -184,13 +353,16 @@ func (s *Server) record() (control.Record, error) {
 	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.Port() == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return control.Record{}, errors.New("无效的本机控制地址")
 	}
-	if key, err := hex.DecodeString(record.Token); err != nil || len(key) != 32 || record.PID != s.readStatus().PID || !s.owns(record.PID) {
+	if key, err := hex.DecodeString(record.Token); err != nil || len(key) != 32 || record.PID != s.readStatusFrom(dir).PID || !s.owns(record.PID) {
 		return control.Record{}, errors.New("后台尚未就绪")
 	}
 	return record, nil
 }
 func (s *Server) call(ctx context.Context, path string, body any, result any) error {
-	record, err := s.record()
+	return s.callFor(ctx, s.config.Dir, path, body, result)
+}
+func (s *Server) callFor(ctx context.Context, dir, path string, body any, result any) error {
+	record, err := s.recordFor(dir)
 	if err != nil {
 		return err
 	}
@@ -225,25 +397,53 @@ func (s *Server) call(ctx context.Context, path string, body any, result any) er
 	}
 	return nil
 }
-func (s *Server) snapshot(ctx context.Context) view {
-	result := view{Status: s.readStatus(), Devices: []control.Device{}}
-	s.mu.Lock()
-	result.Launching, result.Message = s.launching, s.message
-	s.mu.Unlock()
+func (s *Server) snapshot(ctx context.Context) view { return s.snapshotFor(ctx, "") }
+
+// snapshotFor renders one account. An empty id selects the server's own
+// directory, preserving the single-account behaviour.
+func (s *Server) snapshotFor(ctx context.Context, id string) view {
+	s.accountsMu.Lock()
+	accounts := append([]*Account(nil), s.accounts...)
+	s.accountsMu.Unlock()
+	dir := s.config.Dir
+	var account *Account
+	for _, candidate := range accounts {
+		if (id == "" && filepath.Clean(candidate.Dir) == filepath.Clean(s.config.Dir)) || candidate.ID == id {
+			account, dir = candidate, candidate.Dir
+			break
+		}
+	}
+	// A migrated install keeps no account in the root directory, so fall back
+	// to the first registered account instead of rendering an empty panel.
+	if account == nil && id == "" && len(accounts) > 0 && filepath.Clean(accounts[0].Dir) != filepath.Clean(s.config.Dir) {
+		account, dir = accounts[0], accounts[0].Dir
+	}
+	result := view{Status: s.readStatusFrom(dir), Devices: []control.Device{}}
+	if account == nil {
+		s.mu.Lock()
+		result.Launching, result.Message = s.launching, s.message
+		s.mu.Unlock()
+	} else {
+		account.mu.Lock()
+		result.Launching, result.Message = account.launching, account.message
+		account.mu.Unlock()
+	}
+	result.Accounts = s.listAccounts(ctx)
+	result.Selected = id
+	if account != nil {
+		result.Selected = account.ID
+	}
 	var session struct {
 		AppleID string `json:"appleId"`
 	}
-	data, _ := os.ReadFile(filepath.Join(s.config.Dir, "session.json"))
+	data, _ := os.ReadFile(filepath.Join(dir, "session.json"))
 	json.Unmarshal(data, &session)
 	if session.AppleID != "" {
-		pieces := strings.SplitN(session.AppleID, "@", 2)
-		if len(pieces) == 2 && len(pieces[0]) > 0 {
-			result.Account = pieces[0][:1] + "***@" + pieces[1]
-		}
+		result.Account = maskAccount(session.AppleID)
 	}
 	if result.Status.Running {
 		var live control.View
-		if s.call(ctx, "/view", nil, &live) == nil && json.Unmarshal(live.Status, &result.Status) == nil {
+		if s.callFor(ctx, dir, "/view", nil, &live) == nil && json.Unmarshal(live.Status, &result.Status) == nil {
 			result.Devices = live.Devices
 			result.Pending = live.Pending
 			result.CodeReady = live.CodeReady
@@ -253,13 +453,31 @@ func (s *Server) snapshot(ctx context.Context) view {
 	return result
 }
 func (s *Server) Start(ctx context.Context, creds credentials) control.Result {
+	// Start acts on the account that owns the server's own directory. A
+	// registered account is started through startAccount so one account's
+	// credentials can never land in another account's directory.
+	if account := s.lookup(""); account != nil {
+		return s.startAccount(ctx, account, creds)
+	}
+	return s.startIn(ctx, s.config.Dir, creds, nil)
+}
+
+// startAccount starts one registered account inside its own directory.
+func (s *Server) startAccount(ctx context.Context, account *Account, creds credentials) control.Result {
+	if account == nil {
+		return control.Result{Message: "账号不存在"}
+	}
+	return s.startIn(ctx, account.Dir, creds, account)
+}
+
+func (s *Server) startIn(ctx context.Context, dir string, creds credentials, account *Account) control.Result {
 	if !s.launchMu.TryLock() {
 		return control.Result{Message: "正在启动，请稍等"}
 	}
 	defer s.launchMu.Unlock()
-	current := s.readStatus()
+	current := s.readStatusFrom(dir)
 	if current.Running {
-		if _, err := s.record(); err == nil {
+		if _, err := s.recordFor(dir); err == nil {
 			return control.Result{OK: true, Message: "已连接到现有后台"}
 		}
 	}
@@ -272,33 +490,30 @@ func (s *Server) Start(ctx context.Context, creds credentials) control.Result {
 	if creds.TwoFactor != "sms" && creds.TwoFactor != "circle" {
 		return control.Result{Message: "不支持的验证方式"}
 	}
-	s.mu.Lock()
-	s.launching = true
-	s.message = ""
-	s.mu.Unlock()
-	defer func() { s.mu.Lock(); s.launching = false; s.mu.Unlock() }()
+	s.setLaunching(account, true)
+	defer s.setLaunching(account, false)
 	if current.Running {
-		if err := s.stop(ctx); err != nil {
+		if err := s.stopIn(ctx, dir); err != nil {
 			return control.Result{Message: err.Error()}
 		}
 	}
 	if _, err := os.Stat(s.config.Worker); err != nil {
 		return control.Result{Message: "缺少后台程序，请重新运行启动脚本"}
 	}
-	if err := os.MkdirAll(s.config.Dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return control.Result{Message: "无法写入本机状态目录"}
 	}
-	output, err := os.OpenFile(filepath.Join(s.config.Dir, "daemon.out.log"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	output, err := os.OpenFile(filepath.Join(dir, "daemon.out.log"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return control.Result{Message: "无法创建运行日志"}
 	}
 	defer output.Close()
-	diagnostic, err := os.OpenFile(filepath.Join(s.config.Dir, "daemon.err.log"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	diagnostic, err := os.OpenFile(filepath.Join(dir, "daemon.err.log"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return control.Result{Message: "无法创建运行日志"}
 	}
 	defer diagnostic.Close()
-	command := exec.Command(s.config.Worker, "-native-adi", "-background", "-control-api", "-gui-auth", "-dir", s.config.Dir, "-adi-dll", s.config.Library, "-python", s.config.Python)
+	command := exec.Command(s.config.Worker, "-native-adi", "-background", "-control-api", "-gui-auth", "-dir", dir, "-adi-dll", s.config.Library, "-python", s.config.Python)
 	command.Args = append(command.Args, "-twofactor", creds.TwoFactor)
 	configureProcess(command)
 	for _, entry := range os.Environ() {
@@ -314,13 +529,38 @@ func (s *Server) Start(ctx context.Context, creds credentials) control.Result {
 	}
 	go func() {
 		if err := command.Wait(); err != nil {
-			s.mu.Lock()
-			s.message = "后台异常停止，请查看状态并重新连接"
-			s.mu.Unlock()
+			s.setMessage(account, "后台异常停止，请查看状态并重新连接")
 		}
 	}()
 	return control.Result{OK: true, Message: "正在连接 Apple，请稍等"}
 }
+
+// setLaunching and setMessage record progress on the account when there is one,
+// and on the server itself for the legacy single-account path.
+func (s *Server) setLaunching(account *Account, value bool) {
+	if account == nil {
+		s.mu.Lock()
+		s.launching = value
+		s.mu.Unlock()
+		return
+	}
+	account.mu.Lock()
+	account.launching = value
+	account.mu.Unlock()
+}
+
+func (s *Server) setMessage(account *Account, message string) {
+	if account == nil {
+		s.mu.Lock()
+		s.message = message
+		s.mu.Unlock()
+		return
+	}
+	account.mu.Lock()
+	account.message = message
+	account.mu.Unlock()
+}
+
 func (s *Server) Bootstrap(ctx context.Context, appleID, password string) {
 	if appleID != "" && password != "" {
 		go func() {
@@ -333,13 +573,17 @@ func (s *Server) Bootstrap(ctx context.Context, appleID, password string) {
 		}()
 	}
 }
-func (s *Server) stop(ctx context.Context) error {
-	status := s.readStatus()
+func (s *Server) stop(ctx context.Context) error { return s.stopIn(ctx, s.config.Dir) }
+
+// stopIn stops the worker that owns one account directory. Each account has its
+// own worker, so stopping one leaves every other account running.
+func (s *Server) stopIn(ctx context.Context, dir string) error {
+	status := s.readStatusFrom(dir)
 	if !status.Running {
 		return nil
 	}
 	data, _ := json.Marshal(map[string]int{"pid": status.PID})
-	if os.WriteFile(filepath.Join(s.config.Dir, "stop-request.json"), data, 0600) != nil {
+	if os.WriteFile(filepath.Join(dir, "stop-request.json"), data, 0600) != nil {
 		return errors.New("无法停止后台")
 	}
 	ticker := time.NewTicker(200 * time.Millisecond)
@@ -394,22 +638,59 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case r.Method == "GET" && r.URL.Path == "/api/view":
 			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 			defer cancel()
-			json.NewEncoder(w).Encode(s.snapshot(ctx))
+			json.NewEncoder(w).Encode(s.snapshotFor(ctx, r.URL.Query().Get("account")))
 			return
 		case r.Method == "POST" && r.URL.Path == "/api/start":
 			var creds credentials
 			if !readJSON(w, r, &creds) {
 				return
 			}
+			if account := r.URL.Query().Get("account"); account != "" {
+				json.NewEncoder(w).Encode(s.startAccount(r.Context(), s.lookup(account), creds))
+				return
+			}
 			json.NewEncoder(w).Encode(s.Start(r.Context(), creds))
 			return
-		case r.Method == "POST" && r.URL.Path == "/api/stop":
-			var body struct{}
+		case r.Method == "POST" && r.URL.Path == "/api/accounts/add":
+			// A new account always gets its own directory, so an existing
+			// account's session is never overwritten.
+			var creds credentials
+			if !readJSON(w, r, &creds) {
+				return
+			}
+			result, id := s.addAccount(r.Context(), creds)
+			if id != "" {
+				result.Message = strings.TrimSpace(result.Message)
+			}
+			json.NewEncoder(w).Encode(result)
+			return
+		case r.Method == "POST" && r.URL.Path == "/api/accounts/remove":
+			var body struct {
+				ID string `json:"id"`
+			}
 			if !readJSON(w, r, &body) {
 				return
 			}
+			json.NewEncoder(w).Encode(s.removeAccount(r.Context(), body.ID))
+			return
+		case r.Method == "POST" && r.URL.Path == "/api/stop":
+			var body struct {
+				Account string `json:"account"`
+			}
+			if !readJSON(w, r, &body) {
+				return
+			}
+			dir := s.config.Dir
+			if body.Account != "" {
+				account := s.lookup(body.Account)
+				if account == nil {
+					json.NewEncoder(w).Encode(control.Result{Message: "账号不存在"})
+					return
+				}
+				dir = account.Dir
+			}
 			result := control.Result{OK: true, Message: "后台已停止，登录状态已保留"}
-			if err := s.stop(r.Context()); err != nil {
+			if err := s.stopIn(r.Context(), dir); err != nil {
 				result.OK = false
 				result.Message = "后台停止未完成，请稍后查看"
 			}
@@ -420,8 +701,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !readJSON(w, r, &action) {
 				return
 			}
+			dir := s.config.Dir
+			if account := r.URL.Query().Get("account"); account != "" {
+				found := s.lookup(account)
+				if found == nil {
+					json.NewEncoder(w).Encode(control.Result{Message: "账号不存在"})
+					return
+				}
+				dir = found.Dir
+			}
 			var result control.Result
-			if err := s.call(r.Context(), "/action", action, &result); err != nil {
+			if err := s.callFor(r.Context(), dir, "/action", action, &result); err != nil {
 				result.Message = err.Error()
 			}
 			json.NewEncoder(w).Encode(result)

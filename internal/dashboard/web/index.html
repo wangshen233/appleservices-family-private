@@ -19,8 +19,9 @@
   </nav>
   <div class="account-switcher">
     <div class="account-switcher-head"><span class="nav-label">账号</span><button type="button" id="addAccountButton" title="添加账号">＋</button></div>
-    <button type="button" class="account-item active" id="currentAccountItem"><span class="account-avatar" id="sidebarAvatar">a</span><span class="account-item-copy"><strong id="accountItemName">当前账号</strong><small>在线工作区</small></span><i></i></button>
+    <div id="accountList" class="account-list"></div>
     <button type="button" class="add-account-item" id="addAccountButtonSecondary"><span>＋</span>添加其他账号</button>
+    <button type="button" class="add-account-item" id="removeAccountButton" title="只从列表移除，设备身份保留在磁盘上"><span>−</span>移除当前账号</button>
   </div>
   <div class="sidebar-note"><span class="small-orb"></span><strong>只在这台电脑运行</strong><p>关闭面板后，后台仍继续保持登录。</p></div>
   <div class="sidebar-bottom"><span class="avatar">a</span><span id="sidebarAccount">本机账户<small>Windows 工作空间</small></span></div>
