@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -108,11 +107,13 @@ func TestGSAUsesFreshConnectionButKeepsSessionCookies(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-			} else {
-				var authErr *AuthenticationError
-				if !errors.As(err, &authErr) || authErr.HTTPStatus != 429 {
-					t.Fatal("pooled connection did not reproduce second-request rejection")
-				}
+				return
+			}
+			// A pooled connection keeps answering 429, which is now treated as a
+			// dropped request and resent until the attempts run out. The failure
+			// must still surface rather than be mistaken for success.
+			if err == nil {
+				t.Fatal("a permanently rejected pooled connection was reported as success")
 			}
 		})
 	}

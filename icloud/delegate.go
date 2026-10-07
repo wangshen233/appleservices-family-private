@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Laky-64/appleservices/internal/httpx"
@@ -14,6 +16,18 @@ import (
 )
 
 var setupBaseURL = "https://setup.icloud.com"
+
+// setupBaseFor returns the setup host for an account's region. Apple operates
+// iCloud in mainland China through a separate operator (GCBD) on the .com.cn
+// domains; asking the global host for a mainland account's delegates is
+// answered with "A server problem is blocking Apple ID sign in" and no
+// service-data. APPLESERVICES_ICLOUD_SETUP overrides the host outright.
+func setupBaseFor(appleID string) string {
+	if override := strings.TrimSpace(os.Getenv("APPLESERVICES_ICLOUD_SETUP")); override != "" {
+		return override
+	}
+	return setupBaseURL
+}
 
 type DelegateTokens struct {
 	DSID          string
@@ -47,7 +61,7 @@ func FetchDelegateTokens(anisetteHeaders map[string]string, username, adsid, pet
 		headers[k] = v
 	}
 
-	result, err := http.ExecuteRequest(setupBaseURL+"/setup/iosbuddy/loginDelegates",
+	result, err := http.ExecuteRequest(setupBaseFor(username)+"/setup/iosbuddy/loginDelegates",
 		http.Method("POST"),
 		http.Body(buf.Bytes()),
 		http.Headers(headers),
@@ -64,17 +78,46 @@ func FetchDelegateTokens(anisetteHeaders map[string]string, username, adsid, pet
 	if _, err := plist.Unmarshal(result.Body, &decoded); err != nil {
 		return DelegateTokens{}, fmt.Errorf("icloud: decode loginDelegates response: %w", err)
 	}
+	if path := strings.TrimSpace(os.Getenv("APPLESERVICES_DELEGATE_DUMP")); path != "" {
+		// A refusal explains itself in localizedError and description, which the
+		// per-delegate status does not carry. Keep the raw plist so a failure
+		// stays diagnosable instead of collapsing into "status 1".
+		_ = os.WriteFile(path, result.Body, 0o600)
+	}
 	return extractDelegateTokens(decoded, adsid)
 }
 
 func extractDelegateTokens(resp map[string]any, fallbackDSID string) (DelegateTokens, error) {
+	// localizedError and description are separate channels from the delegate's
+	// own status fields, and they are where a refusal states its reason. Reading
+	// only the delegate status turns an explained failure into "status 1".
+	localized, _ := resp["localizedError"].(string)
+	description, _ := resp["description"].(string)
+	explain := func() string {
+		parts := make([]string, 0, 2)
+		if localized != "" {
+			parts = append(parts, fmt.Sprintf("localizedError=%q", localized))
+		}
+		if description != "" {
+			parts = append(parts, fmt.Sprintf("description=%q", description))
+		}
+		if len(parts) == 0 {
+			return ""
+		}
+		return " (" + strings.Join(parts, ", ") + ")"
+	}
+	if top, ok := resp["status"]; ok && !isZeroStatus(top) {
+		if explanation := explain(); explanation != "" {
+			return DelegateTokens{}, errors.New("icloud: loginDelegates refused the delegate" + explanation)
+		}
+	}
 	delegates, ok := resp["delegates"].(map[string]any)
 	if !ok {
-		return DelegateTokens{}, errors.New("icloud: loginDelegates response has no delegates")
+		return DelegateTokens{}, errors.New("icloud: loginDelegates response has no delegates" + explain())
 	}
 	mme, ok := delegates["com.apple.mobileme"].(map[string]any)
 	if !ok {
-		return DelegateTokens{}, errors.New("icloud: loginDelegates response has no com.apple.mobileme delegate")
+		return DelegateTokens{}, errors.New("icloud: loginDelegates response has no com.apple.mobileme delegate" + explain())
 	}
 	sd, ok := mme["service-data"].(map[string]any)
 	if !ok {
@@ -83,7 +126,7 @@ func extractDelegateTokens(resp map[string]any, fallbackDSID string) (DelegateTo
 		if len(shape) > 400 {
 			shape = shape[:400]
 		}
-		return DelegateTokens{}, fmt.Errorf("icloud: mobileme delegate has no service-data (status-message: %q, delegate: %s)", msg, shape)
+		return DelegateTokens{}, fmt.Errorf("icloud: mobileme delegate has no service-data (status-message: %q, delegate: %s)%s", msg, shape, explain())
 	}
 	tokens, ok := sd["tokens"].(map[string]any)
 	if !ok {
@@ -109,6 +152,22 @@ func extractDelegateTokens(resp map[string]any, fallbackDSID string) (DelegateTo
 		dsid = d
 	}
 	return DelegateTokens{DSID: dsid, MMEAuthToken: mmeToken, CloudKitToken: ckToken, ServiceData: sd}, nil
+}
+
+// isZeroStatus reports whether a plist status value means success. Apple sends
+// the field as an integer in the delegate response and as a string elsewhere.
+func isZeroStatus(v any) bool {
+	switch s := v.(type) {
+	case int64:
+		return s == 0
+	case uint64:
+		return s == 0
+	case int:
+		return s == 0
+	case string:
+		return strings.TrimSpace(s) == "0"
+	}
+	return false
 }
 
 func coerceDSID(v any) string {

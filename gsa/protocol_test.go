@@ -90,7 +90,26 @@ func TestGrandSlamStopsOnUnknownProtocol(t *testing.T) {
 }
 
 func TestGrandSlamErrorsIdentifyStage(t *testing.T) {
+	// 429 and 5xx are dropped requests, not answers: they are resent, and only
+	// a permanent status is reported as an HTTP rejection.
 	for _, status := range []int{429, 503} {
+		if !retryableGSAStatus(status) {
+			t.Fatalf("status %d is not treated as a dropped request", status)
+		}
+		c := NewClient(headerProvider{})
+		requests := 0
+		c.transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+			requests++
+			return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("test error"))}, nil
+		})
+		if _, err := c.doRequest(map[string]any{"o": "init"}); err == nil {
+			t.Fatal("exhausted retries were reported as success")
+		}
+		if requests != gsaRequestAttempts {
+			t.Fatalf("made %d attempts, want %d", requests, gsaRequestAttempts)
+		}
+	}
+	for _, status := range []int{400, 401, 405} {
 		c := NewClient(headerProvider{})
 		c.transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("test error"))}, nil

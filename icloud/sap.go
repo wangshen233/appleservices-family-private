@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Laky-64/appleservices/internal/sap"
 	"golang.org/x/net/proxy"
@@ -450,6 +451,54 @@ func decodeStoreLogin(body []byte, status int, header http.Header) (*storeSessio
 	return &storeSession{DSID: result.DSID, PasswordToken: result.PasswordToken, StoreFront: header.Get("X-Set-Apple-Store-Front"), Pod: strings.TrimSpace(header.Get("pod"))}, nil
 }
 
+// storeAuthAttempts bounds how many times a store login is sent before giving
+// up. The edge in front of the authentication endpoint answers a request it
+// cannot route with a bare 204, a 301 to an HTML body, a 403, a 404 or a 5xx —
+// all with no usable payload. Those are the same statuses a working App Store
+// client treats as transient and retries, and the share of requests that reach
+// the application is small and varies widely, so one attempt almost always
+// loses the draw.
+const storeAuthAttempts = 12
+
+// storeAuthRetryDelay and storeAuthRetryCap pace the retries. The edge's
+// behaviour changes on the scale of minutes, so the retries stay close together
+// while a login attempt is still worth completing.
+const (
+	storeAuthRetryDelay = 400 * time.Millisecond
+	storeAuthRetryCap   = 2 * time.Second
+)
+
+// retryableStoreAuthStatus reports whether a status means the request never
+// reached the application. Only a 200 carries an application answer; every
+// other status is routing noise that says nothing about the credentials.
+func retryableStoreAuthStatus(status int) bool {
+	switch status {
+	case http.StatusNoContent, http.StatusForbidden, http.StatusNotFound, http.StatusTooManyRequests:
+		return true
+	}
+	return status/100 == 5
+}
+
+// storeAuthRetryAfter honors an explicit Retry-After when Apple sends one.
+func storeAuthRetryAfter(header http.Header, now time.Time) time.Duration {
+	value := strings.TrimSpace(header.Get("Retry-After"))
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseUint(value, 10, 32); err == nil {
+		if seconds > uint64(storeAuthRetryCap/time.Second) {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if date, err := http.ParseTime(value); err == nil {
+		if wait := date.Sub(now); wait > 0 && wait <= storeAuthRetryCap {
+			return wait
+		}
+	}
+	return 0
+}
+
 func authenticateSignedStore(ctx context.Context, client *http.Client, endpoint, appleID, password, code, guid string, headers map[string]string, signer sap.ActionSigner) (*storeSession, error) {
 	if code != "" && (len(code) != 6 || strings.IndexFunc(code, func(r rune) bool { return r < '0' || r > '9' }) != -1) {
 		return nil, &StorageError{Stage: "purchase-store-code"}
@@ -458,6 +507,7 @@ func authenticateSignedStore(ctx context.Context, client *http.Client, endpoint,
 	// the plist body itself; the SAP action signature belongs to the legacy
 	// MZFinance authenticate endpoint only.
 	modernAuth := isModernStoreAuthEndpoint(endpoint)
+	routeRetries := 0
 	for attempt, redirects := 1, 0; ; {
 		body, err := plistLoginAttemptBody(appleID, password+code, guid, attempt)
 		if err != nil {
@@ -515,6 +565,25 @@ func authenticateSignedStore(ctx context.Context, client *http.Client, endpoint,
 			continue
 		}
 		if status < 200 || status >= 300 {
+			// A retryable status means the request never reached the
+			// application, so it is resent unchanged rather than reported as a
+			// credential failure.
+			if retryableStoreAuthStatus(status) && routeRetries < storeAuthAttempts {
+				routeRetries++
+				delay := storeAuthRetryDelay << min(routeRetries-1, 3)
+				if delay > storeAuthRetryCap {
+					delay = storeAuthRetryCap
+				}
+				if requested := storeAuthRetryAfter(resp.Header, time.Now()); requested > 0 {
+					delay = requested
+				}
+				select {
+				case <-ctx.Done():
+					return nil, &StorageError{Stage: "purchase-store-authentication", HTTPStatus: status}
+				case <-time.After(delay):
+				}
+				continue
+			}
 			return nil, &StorageError{Stage: "purchase-store-authentication", HTTPStatus: status,
 				Hint: requestFingerprint(req, guid) + ";" + storeHeaderHint(resp.Header)}
 		}

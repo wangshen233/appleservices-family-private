@@ -283,8 +283,25 @@ func (c *Client) Headers() (map[string]string, error) {
 			return nil, fmt.Errorf("nativeadi: authentication header %s is missing", key)
 		}
 	}
+	// The ADI module reports the machine identifier it derived, but not the
+	// lookup value that ties it to this device. Every other anisette provider
+	// sends X-Apple-I-MD-LU, and Apple answers a delegate request without it by
+	// refusing the mobileme service.
+	if message.Headers["X-Apple-I-MD-LU"] == "" {
+		if os.Getenv("APPLESERVICES_ADI_NO_MDLU") == "" {
+			sum := sha256.Sum256(c.config.Identifier)
+			message.Headers["X-Apple-I-MD-LU"] = hex.EncodeToString(sum[:])
+		}
+	}
 	message.Headers["X-Apple-I-SRL-NO"] = c.config.Serial
 	message.Headers["User-Agent"] = "akd/1.0 CFNetwork/1408.0.4 Darwin/22.5.0"
+	// X-Apple-I-MD-RINFO is a routing/provisioning state. Known-good clients
+	// send 17106176 or 50660608, and Apple refuses the mobileme delegate with
+	// "A server problem is blocking Apple ID sign in" when the value is one it
+	// does not accept. The override exists so that claim stays testable.
+	if override := strings.TrimSpace(os.Getenv("APPLESERVICES_ADI_RINFO")); override != "" {
+		message.Headers["X-Apple-I-MD-RINFO"] = override
+	}
 	return message.Headers, nil
 }
 

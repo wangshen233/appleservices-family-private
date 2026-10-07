@@ -219,7 +219,14 @@ func appleEndpoint(endpoint string) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
-	return host == "icloud.com" || strings.HasSuffix(host, ".icloud.com") || host == "apple.com" || strings.HasSuffix(host, ".apple.com")
+	// The .com.cn authorities are Apple's mainland China deployment, operated
+	// by GCBD. A mainland account's quota service only answers there.
+	for _, suffix := range []string{"icloud.com", "apple.com", "icloud.com.cn", "apple.com.cn"} {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // FetchStorageInfo performs a read-only authenticated quota request. Redirects

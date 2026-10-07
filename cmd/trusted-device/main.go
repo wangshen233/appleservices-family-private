@@ -332,8 +332,11 @@ func run() (runErr error) {
 							result.Message = "短信已发送"
 						}
 					case "submit-sms":
-						if login.SubmitCode(factor, command.Code) != nil {
-							result.Message = "验证码无效或已过期，请重新输入"
+						// The reason Apple gives is the only thing that
+						// separates an expired code from a rejected one, so it
+						// is reported instead of a fixed message.
+						if err := login.SubmitCode(factor, command.Code); err != nil {
+							result.Message = "验证码未被接受：" + err.Error()
 						} else {
 							result.OK = true
 							result.Message = "验证码已验证，正在完成登录"
