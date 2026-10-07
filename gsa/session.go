@@ -31,6 +31,7 @@ func (c *Client) requestURLs() []string {
 		deviceListURL,
 		deviceServiceURL,
 		deviceTeardownURL,
+		circleServiceURL,
 	}
 }
 

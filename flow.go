@@ -3,6 +3,7 @@ package appleservices
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/Laky-64/appleservices/anisette"
@@ -44,6 +45,7 @@ type Login struct {
 	idmsToken      string
 	client         *Client
 	serialNumber   string
+	storeCommerce  *icloud.StoreCommerceSession
 }
 
 func BeginLogin(creds Credentials, store Store, opts ...Option) (*Login, error) {
@@ -150,10 +152,35 @@ func (l *Login) authenticate() error {
 	l.adsid, l.idmsToken = adsid, idmsToken
 	l.needsTwoFactor = res.NeedsTwoFactor
 	l.client = nil
+	l.storeCommerce = nil
 	return nil
 }
 
 func (l *Login) NeedsTwoFactor() bool { return l.needsTwoFactor }
+
+// BeginAccountValidation starts a fresh password-authenticated challenge for
+// an already configured account. It is used by the dashboard when Apple asks
+// for a device code again; it never opens or drives the official client.
+func (l *Login) BeginAccountValidation() error {
+	res, err := l.backend.Login(l.creds.AppleID, l.creds.Password)
+	if err != nil {
+		return fmt.Errorf("appleservices: validation login: %w", err)
+	}
+	if res == nil || res.SessionPayload == nil {
+		return errors.New("appleservices: validation returned no session")
+	}
+	adsid, idms := spdString(res.SessionPayload, "adsid"), spdString(res.SessionPayload, "GsIdmsToken")
+	if adsid == "" || adsid != l.adsid || idms == "" {
+		return errors.New("appleservices: validation returned a different account")
+	}
+	l.result, l.adsid, l.idmsToken = res, adsid, idms
+	l.needsTwoFactor, l.client = res.NeedsTwoFactor, nil
+	l.storeCommerce = nil
+	if !l.needsTwoFactor {
+		return nil
+	}
+	return l.RequestCode(TrustedDevice)
+}
 
 type TwoFactorMethod int
 
@@ -206,6 +233,7 @@ func (l *Login) SubmitCode(method TwoFactorMethod, code string) error {
 			}
 			l.result = result
 			l.needsTwoFactor = false
+			l.storeCommerce = nil
 			return l.persistDevice()
 		}
 	}
@@ -221,10 +249,15 @@ func (l *Login) SubmitCode(method TwoFactorMethod, code string) error {
 // Client is the result of a completed iCloud login. Tokens are sensitive.
 // This login-only client has no data retrieval or modification methods.
 type Client struct {
-	DSID          string
-	ADSID         string
-	MMEAuthToken  string
-	CloudKitToken string
+	DSID         string
+	ADSID        string
+	MMEAuthToken string
+	// StorageBuyToken is the GSA service token scoped to iCloud+ storage
+	// commerce (com.apple.gs.icloud.storage.buy). It is distinct from the
+	// iCloud mobileme token and is required by Apple's Store purchase flow.
+	StorageBuyToken string
+	CloudKitToken   string
+	serviceData     map[string]any
 }
 
 // Client exchanges the authenticated Apple ID session for iCloud tokens.
@@ -250,12 +283,30 @@ func (l *Login) Client() (*Client, error) {
 	}
 	dt, err := l.fetchDelegate(headers, l.creds.AppleID, l.adsid, pet)
 	if err != nil {
+		// Apple refuses the iCloud delegate for some accounts, for example
+		// while a fresh sign-in is still being reviewed ("A server problem is
+		// blocking Apple ID sign in"). Device registration and the account
+		// device list run on the GSA session, so an operator may opt in (for
+		// the trusted-device tool only) to continue with a client that has no
+		// iCloud service data. Default behaviour still refuses to report
+		// success without iCloud acceptance.
+		if os.Getenv("APPLESERVICES_ALLOW_DEGRADED_ICLOUD") == "1" {
+			gsess, snapErr := l.backend.Snapshot(l.adsid, spdTokens(l.result.SessionPayload))
+			if snapErr == nil {
+				sess := fromGSASession(gsess)
+				sess.AppleID = l.creds.AppleID
+				if saveErr := l.store.SaveSession(&sess); saveErr == nil {
+					l.client = &Client{ADSID: l.adsid, serviceData: map[string]any{}}
+					return l.client, nil
+				}
+			}
+		}
 		return nil, fmt.Errorf("appleservices: iCloud login: %w", err)
 	}
 	if dt.DSID == "" || dt.MMEAuthToken == "" {
 		return nil, errors.New("appleservices: iCloud login returned no account ID or auth token")
 	}
-	gsess, err := l.backend.Snapshot(l.adsid, nil)
+	gsess, err := l.backend.Snapshot(l.adsid, spdTokens(l.result.SessionPayload))
 	if err != nil {
 		return nil, fmt.Errorf("appleservices: snapshot session: %w", err)
 	}
@@ -264,7 +315,9 @@ func (l *Login) Client() (*Client, error) {
 	if err := l.store.SaveSession(&sess); err != nil {
 		return nil, fmt.Errorf("appleservices: save session: %w", err)
 	}
-	l.client = &Client{DSID: dt.DSID, ADSID: l.adsid, MMEAuthToken: dt.MMEAuthToken, CloudKitToken: dt.CloudKitToken}
+	l.client = &Client{DSID: dt.DSID, ADSID: l.adsid, MMEAuthToken: dt.MMEAuthToken,
+		StorageBuyToken: spdToken(l.result.SessionPayload, "com.apple.gs.icloud.storage.buy"),
+		CloudKitToken:   dt.CloudKitToken, serviceData: dt.ServiceData}
 	return l.client, nil
 }
 
@@ -274,7 +327,7 @@ func (l *Login) SaveSession() error {
 	if l.client == nil || l.needsTwoFactor {
 		return errors.New("appleservices: complete authentication before saving the session")
 	}
-	gsess, err := l.backend.Snapshot(l.adsid, nil)
+	gsess, err := l.backend.Snapshot(l.adsid, spdTokens(l.result.SessionPayload))
 	if err != nil {
 		return fmt.Errorf("appleservices: snapshot session: %w", err)
 	}
@@ -291,7 +344,7 @@ func toGSASession(s Session) gsa.Session {
 	for _, c := range s.Cookies {
 		cookies[c.URL] = append(cookies[c.URL], gsa.CookieKV{Name: c.Name, Value: c.Value})
 	}
-	return gsa.Session{DSID: s.DSID, Cookies: cookies}
+	return gsa.Session{DSID: s.DSID, Cookies: cookies, Tokens: s.Tokens}
 }
 
 func fromGSASession(g gsa.Session) Session {
@@ -301,10 +354,29 @@ func fromGSASession(g gsa.Session) Session {
 			cookies = append(cookies, Cookie{URL: url, Name: kv.Name, Value: kv.Value})
 		}
 	}
-	return Session{DSID: g.DSID, Cookies: cookies}
+	return Session{DSID: g.DSID, Cookies: cookies, Tokens: g.Tokens}
 }
 
 func spdString(m map[string]any, key string) string {
 	s, _ := m[key].(string)
 	return s
+}
+
+func spdToken(m map[string]any, service string) string {
+	tokens, _ := m["t"].(map[string]any)
+	entry, _ := tokens[service].(map[string]any)
+	token, _ := entry["token"].(string)
+	return token
+}
+
+func spdTokens(m map[string]any) map[string]string {
+	tokens, _ := m["t"].(map[string]any)
+	result := map[string]string{}
+	for service, raw := range tokens {
+		entry, _ := raw.(map[string]any)
+		if token, _ := entry["token"].(string); token != "" {
+			result[service] = token
+		}
+	}
+	return result
 }

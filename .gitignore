@@ -1,5 +1,6 @@
 .idea
-.claude
+.claude/*
+!.claude/skills/
 .cache/
 backups/
 bin/

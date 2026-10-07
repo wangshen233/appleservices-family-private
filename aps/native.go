@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf16"
+
+	"github.com/Laky-64/appleservices/internal/backgroundexec"
 )
 
 //go:embed native_push.cs
@@ -108,6 +110,7 @@ func nativeCommand(probe bool) (*exec.Cmd, error) {
 	// contents, provider paths, or user supplied shell expressions are arguments.
 	command := exec.Command(filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
 		"-NoLogo", "-NoProfile", "-NonInteractive", "-Mta", "-EncodedCommand", base64.StdEncoding.EncodeToString(data))
+	backgroundexec.Configure(command)
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		if !strings.EqualFold(key, "APPLESERVICES_APPLEID") && !strings.EqualFold(key, "APPLESERVICES_PASSWORD") {
@@ -208,7 +211,15 @@ func (c *NativeClient) read(output io.Reader) {
 				break
 			}
 			event, err := ParseEvent(message.Payload)
-			if errors.Is(err, ErrUnhandledNotice) {
+			if event.Unsupported {
+				select {
+				case c.events <- event:
+				default:
+					failure = errors.New("aps: native notification queue is full")
+				}
+				if failure != nil {
+					break
+				}
 				continue
 			}
 			if err != nil {

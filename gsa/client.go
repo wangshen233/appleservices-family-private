@@ -36,6 +36,7 @@ type Client struct {
 	smsCodeAlreadySent    bool
 	loginPayload          map[string]any
 	verifiedTokens        map[string]string
+	responseHeaders       map[string][]string
 	pushToken             []byte
 	nativeDevice          bool
 	requestID             string
@@ -151,6 +152,7 @@ func (c *Client) doRequest(request map[string]any) (map[string]any, error) {
 	if result == nil {
 		return nil, errors.New("gsa: request returned no response")
 	}
+	c.responseHeaders = cloneHeaderValues(result.Headers)
 
 	var decoded map[string]any
 	if _, err := plist.Unmarshal(result.Body, &decoded); err != nil {
@@ -161,6 +163,17 @@ func (c *Client) doRequest(request map[string]any) (map[string]any, error) {
 		return nil, errors.New("gsa: response missing Response dict")
 	}
 	return respMap, nil
+}
+
+func cloneHeaderValues(src map[string][]string) map[string][]string {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string][]string, len(src))
+	for key, values := range src {
+		dst[key] = append([]string(nil), values...)
+	}
+	return dst
 }
 
 func asInt64(v any) (int64, bool) {
@@ -358,6 +371,13 @@ func (c *Client) Login(username, password string) (*LoginResult, error) {
 		if err != nil {
 			return nil, fmt.Errorf("gsa: decrypt spd: %w", err)
 		}
+	}
+	// Trusted devices can complete without a new 2FA prompt. Apple may still
+	// return the service-scoped commerce tokens in the GrandSlam response
+	// headers, so retain them instead of reducing the session to the PET only.
+	if sessionPayload != nil && len(c.responseHeaders) > 0 {
+		c.collectVerifiedTokens(c.responseHeaders)
+		sessionPayload = c.mergeVerifiedTokens(sessionPayload)
 	}
 
 	au, _ := status["au"].(string)

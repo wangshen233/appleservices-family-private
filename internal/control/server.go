@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/Laky-64/appleservices/icloud"
 )
 
 type Record struct {
@@ -31,6 +33,8 @@ type Device struct {
 }
 type Pending struct {
 	ID         string    `json:"id"`
+	Kind       string    `json:"kind,omitempty"`
+	PairingID  string    `json:"pairing_id,omitempty"`
 	ReceivedAt time.Time `json:"received_at"`
 }
 type View struct {
@@ -45,10 +49,21 @@ type Action struct {
 	RequestID string `json:"request_id,omitempty"`
 }
 type Result struct {
-	OK      bool      `json:"ok"`
-	Message string    `json:"message,omitempty"`
-	Code    string    `json:"code,omitempty"`
-	HideAt  time.Time `json:"hide_at,omitempty"`
+	OK                  bool                            `json:"ok"`
+	Message             string                          `json:"message,omitempty"`
+	Code                string                          `json:"code,omitempty"`
+	CodeKind            string                          `json:"code_kind,omitempty"`
+	HideAt              time.Time                       `json:"hide_at,omitempty"`
+	Storage             *icloud.StorageInfo             `json:"storage,omitempty"`
+	StoragePlan         *icloud.StoragePlanInfo         `json:"storage_plan,omitempty"`
+	Purchase            *icloud.PurchaseResult          `json:"purchase,omitempty"`
+	Stage               string                          `json:"stage,omitempty"`
+	HTTPStatus          int                             `json:"http_status,omitempty"`
+	AppleCode           string                          `json:"apple_code,omitempty"`
+	AppleHint           string                          `json:"apple_hint,omitempty"`
+	StoreAuthentication *icloud.StoreAuthenticationInfo `json:"store_authentication,omitempty"`
+	StoreForm           *icloud.StoreFormInfo           `json:"store_form,omitempty"`
+	Probes              []icloud.StorageEndpointProbe   `json:"probes,omitempty"`
 }
 type Command struct {
 	Action
@@ -139,7 +154,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch action.Action {
-	case "code", "devices", "refresh", "allow", "deny", "submit-sms", "resend-sms":
+	case "code", "devices", "refresh", "validate-account", "allow", "deny", "submit-sms", "resend-sms", "submit-account-code", "storage-info", "storage-plan", "storage-authenticate", "storage-preview", "storage-purchase", "storage-probe", "storage-buy", "submit-pairing":
 	default:
 		http.Error(w, `{"message":"unknown action"}`, 400)
 		return

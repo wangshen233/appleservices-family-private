@@ -49,8 +49,15 @@ func (c *Client) VerifiedLoginResult() *LoginResult {
 	if c.loginPayload == nil || c.verifiedTokens["com.apple.gs.idms.pet"] == "" {
 		return nil
 	}
-	payload := maps.Clone(c.loginPayload)
-	original, _ := payload["t"].(map[string]any)
+	return &LoginResult{SessionPayload: c.mergeVerifiedTokens(c.loginPayload)}
+}
+
+func (c *Client) mergeVerifiedTokens(payload map[string]any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	result := maps.Clone(payload)
+	original, _ := result["t"].(map[string]any)
 	tokens := maps.Clone(original)
 	if tokens == nil {
 		tokens = map[string]any{}
@@ -58,6 +65,6 @@ func (c *Client) VerifiedLoginResult() *LoginResult {
 	for service, token := range c.verifiedTokens {
 		tokens[service] = map[string]any{"token": token}
 	}
-	payload["t"] = tokens
-	return &LoginResult{SessionPayload: payload}
+	result["t"] = tokens
+	return result
 }

@@ -34,6 +34,8 @@ func (s *fakeMaintainedLogin) SaveSession() error { s.saved++; return s.saveErr 
 func (s *fakeMaintainedLogin) RespondToSignIn(string, bool) error {
 	panic("maintenance must not approve requests")
 }
+func (s *fakeMaintainedLogin) BeginAccountValidation() error                          { return nil }
+func (s *fakeMaintainedLogin) SubmitCode(appleservices.TwoFactorMethod, string) error { return nil }
 
 func TestRenewalRequiresFullSameAccountAuthentication(t *testing.T) {
 	for _, test := range []struct {

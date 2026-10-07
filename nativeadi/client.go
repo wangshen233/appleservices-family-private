@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Laky-64/appleservices/internal/backgroundexec"
 	"github.com/google/uuid"
 )
 
@@ -45,6 +46,7 @@ func CheckRuntime(python string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, python, "-c", "import struct,sys; sys.exit(0 if struct.calcsize('P') == 8 and sys.version_info >= (3,10) else 1)")
+	backgroundexec.Configure(command)
 	command.Env = bridgeEnvironment()
 	if err := command.Run(); err != nil {
 		return errors.New("nativeadi: 64-bit Python 3.10 or newer is required")
@@ -167,11 +169,13 @@ func (c *Client) Start(ctx context.Context) error {
 		return errors.New("nativeadi: gcc/MinGW is required to build the local transport isolation shim")
 	}
 	build := exec.CommandContext(ctx, compiler, "-shared", "-O2", filepath.Join(directory, "transport_fence.c"), "-o", fence, "-lws2_32")
+	backgroundexec.Configure(build)
 	build.Env = bridgeEnvironment()
 	if err := build.Run(); err != nil {
 		return errors.New("nativeadi: transport isolation shim build failed")
 	}
 	command := exec.Command(c.config.Python, "-u", filepath.Join(directory, "helper.py"))
+	backgroundexec.Configure(command)
 	// The helper needs no account secrets, including through inherited env vars.
 	command.Env = bridgeEnvironment()
 	input, err := command.StdinPipe()

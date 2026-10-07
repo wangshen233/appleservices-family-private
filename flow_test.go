@@ -122,6 +122,28 @@ func TestNoTwoFactorPersistsOnlyAfterICloudLogin(t *testing.T) {
 	}
 }
 
+func TestClientRetainsStorageBuyServiceToken(t *testing.T) {
+	s := &memoryStore{}
+	b := &fakeBackend{results: []*gsa.LoginResult{{NeedsTwoFactor: false, SessionPayload: map[string]any{
+		"adsid": "test-adsid", "GsIdmsToken": "test-idms",
+		"t": map[string]any{
+			"com.apple.gs.idms.pet":           map[string]any{"token": "test-pet"},
+			"com.apple.gs.icloud.storage.buy": map[string]any{"token": "test-storage-buy"},
+		},
+	}}}}
+	l, err := BeginLogin(Credentials{"owner@example.test", "test-password"}, s, testOptions(b, testDelegate)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := l.Client()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.StorageBuyToken != "test-storage-buy" {
+		t.Fatalf("storage commerce token was not retained")
+	}
+}
+
 func TestCheckpointRequiresAuthenticatedClient(t *testing.T) {
 	store := &memoryStore{}
 	backend := &fakeBackend{results: []*gsa.LoginResult{testResult(false)}}

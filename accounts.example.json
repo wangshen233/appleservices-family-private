@@ -1,0 +1,12 @@
+[
+  {
+    "name": "primary",
+    "apple_id": "first@example.com",
+    "password": "replace-me"
+  },
+  {
+    "name": "secondary",
+    "apple_id": "second@example.com",
+    "password": "replace-me"
+  }
+]

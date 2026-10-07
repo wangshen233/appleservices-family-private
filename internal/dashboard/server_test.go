@@ -105,3 +105,25 @@ func TestDashboardControlAddressCannotReachExternalHosts(t *testing.T) {
 		t.Fatal("dashboard listener was public")
 	}
 }
+
+func TestDeadSavedPIDDoesNotClaimOnlineOrSkipLogin(t *testing.T) {
+	dir := t.TempDir()
+	server, err := New(Config{Dir: dir, Worker: filepath.Join(dir, "worker.exe"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.listener.Close()
+	const deadPID = 2147483647
+	data, _ := json.Marshal(Status{PID: deadPID, Running: true, Authenticated: true, PushConnected: true, State: "online"})
+	os.WriteFile(filepath.Join(dir, "runtime.json"), data, 0600)
+	data, _ = json.Marshal(control.Record{PID: deadPID, URL: "http://127.0.0.1:1", Token: strings.Repeat("a", 64)})
+	os.WriteFile(filepath.Join(dir, "control.json"), data, 0600)
+	status := server.readStatus()
+	if status.Running || status.Authenticated || status.PushConnected || status.State == "online" {
+		t.Fatal("dead saved PID presented as an online worker")
+	}
+	result := server.Start(context.Background(), credentials{})
+	if result.OK || result.Message == "已连接到现有后台" {
+		t.Fatal("stale capability prevented a new login")
+	}
+}

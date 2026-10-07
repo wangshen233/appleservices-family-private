@@ -227,7 +227,10 @@ func (c *Client) Listen(ctx context.Context, handle func(Event) error) error {
 			continue
 		}
 		event, err := ParseEvent(message.get(3))
-		if errors.Is(err, ErrUnhandledNotice) {
+		if event.Unsupported {
+			if err := handle(event); err != nil {
+				return err
+			}
 			continue
 		}
 		if err != nil {

@@ -48,7 +48,7 @@ go build -o .\bin\login.exe ./cmd/login
 | `-appleid` | Apple ID，也可用 `APPLESERVICES_APPLEID` |
 | `-password` | 账号密码，推荐通过脚本隐藏输入或 `APPLESERVICES_PASSWORD` 提供 |
 | `-dir` | 状态目录，默认 `./state`，也可用 `APPLESERVICES_DIR` |
-| `-twofactor` | `trusted-device` 或 `sms` |
+| `-twofactor` | `trusted-device`、`sms` 或 `circle` |
 | `-anisette` | 自定义 anisette 服务地址 |
 | `-logout` | 删除本地会话，不会撤销 Apple 服务器上的会话 |
 
@@ -181,8 +181,7 @@ OpenBubbles 1.18.800.0 Windows 模块。此机器已有对应 Store 包缓存，
 发送一次测试登录请求可能也会通知账号原有的 iPhone。这个通知与首次短信验证是两个不同的步骤。
 
 本机生成码的真实登录验收已通过。用户随后提供的 Apple 官网截图明确显示
-`appleservices` 为可接收验证码的受信任设备。`allow` 按钮流程仍未完成验收，
-此前使用手动 `code` 完成验证。依赖和精确验证边界见 [实现记录](docs/trusted-device.md)。
+`appleservices` 为可接收验证码的受信任设备。Circle 配对流程已接入面板和后台协议；真实 Apple 端到端配对仍需另一个已授权设备实际返回消息。此前使用手动 `code` 完成的验证不能替代这项验收。依赖和精确验证边界见 [实现记录](docs/trusted-device.md)。
 
 保持登录及推送在线：
 
@@ -202,6 +201,35 @@ OpenBubbles 1.18.800.0 Windows 模块。此机器已有对应 Store 包缓存，
 本项目使用自己的登录状态文件；Windows 官方 iCloud 客户端使用它自己的认证状态。
 保持本项目在线不等于完成官方客户端的“验证你的 Apple 账户”。
 
+### iCloud+ 储存页面报错
+
+如果官方 iCloud for Windows 的储存空间页面显示 HTTP 400，先运行：
+
+```powershell
+.\tools\diagnose-icloudplus.ps1
+```
+
+该命令仅输出官方日志的时间、错误类别和返回码，不输出原始日志、账号、URL 参数或认证头。默认查看最近 24 小时；使用 `-Json` 可取得结构化结果。
+
+`terms_update_required` 表示 Apple 要求更新服务条款，需要先完成官方客户端的条款流程。HTTP 401、账户验证提示和购买页面脚本错误分别记录；这些历史日志不能单独证明购买页面 HTTP 400 的原因，也不能证明账户目前已验证。排查记录见 [官方客户端验证记录](docs/official-icloud-verification.md)。
+
+如果需要测试已安装的新 WebView2 运行时，可运行 `.\tools\start-icloud-modern.ps1 -Restart`。该入口只重启官方 iCloud 主界面，使用 Microsoft 签名校验通过的已安装运行时与单独页面缓存；环境变量仅作用于本次启动。正常重启官方客户端即可恢复原运行时与原页面缓存。这是兼容性测试入口，不代表账户验证或订阅错误已经修复。
+
 原始源码保存在 Git 的初始提交 `d6fb108`，也有 `backups/original-source.zip` 备份。
 
 MIT License；与 Apple 无关联。
+## Multiple accounts
+
+Each account must run with its own state directory. This keeps the Apple
+session, device identity, push state, and refresh status isolated. Copy
+`accounts.example.json` to `accounts.json`, replace the placeholders locally,
+and run:
+
+```powershell
+.\run-multi.ps1 -AccountsFile .\accounts.json
+```
+
+The script starts one unified hub at `18741` and one isolated dashboard and
+worker per account on `18742`, `18743`, and so on. Credentials are passed
+through the child process environment and are not placed on the command line.
+Each account may require its own first SMS verification in its dashboard.

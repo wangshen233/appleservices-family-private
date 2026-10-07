@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/Laky-64/appleservices/internal/backgroundexec"
 )
 
 // CodeRequest must describe the same anisette identity used for registration.
@@ -58,6 +60,7 @@ func CodeFromProcess(ctx context.Context, path string, request CodeRequest) (str
 		return "", err
 	}
 	command := exec.CommandContext(ctx, path)
+	backgroundexec.Configure(command)
 	command.Stdin = bytes.NewReader(data)
 	output := &boundedOutput{limit: 4096}
 	command.Stdout = output

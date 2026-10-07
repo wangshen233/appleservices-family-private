@@ -14,9 +14,18 @@ type Event struct {
 	TransactionID         string `json:"txnid"`
 	PreviousTransactionID string `json:"prevtxnid"`
 	AccountID             string `json:"adsid"`
+	CircleTransactionID   string `json:"atxnid,omitempty"`
+	CircleStep            int    `json:"step,omitempty"`
+	PAKE                  string `json:"pake,omitempty"`
+	IDMSData              string `json:"idmsdata,omitempty"`
+	ErrorCode             *int   `json:"ec,omitempty"`
 	// Apple uses both string and object forms of aps.alert. This client does
 	// not display that text; keep it opaque so its shape cannot break routing.
 	Alert json.RawMessage `json:"aps,omitempty"`
+	// Unsupported marks a notification shape that this client does not yet
+	// understand. Keep only size metadata; never log the opaque payload.
+	Unsupported bool `json:"-"`
+	NoticeSize  int  `json:"-"`
 }
 
 // ParseEvent decodes AuthKit notifications. Command 100 requests approval;
@@ -24,10 +33,10 @@ type Event struct {
 func ParseEvent(payload []byte) (Event, error) {
 	var event Event
 	if len(payload) > maxFrame {
-		return event, errors.New("aps: IDMS payload too large")
+		return Event{Unsupported: true, NoticeSize: len(payload)}, errors.New("aps: IDMS payload too large")
 	}
 	if err := json.Unmarshal(payload, &event); err != nil {
-		return Event{}, errors.New("aps: invalid IDMS JSON")
+		return Event{Unsupported: true, NoticeSize: len(payload)}, errors.New("aps: invalid IDMS JSON")
 	}
 	switch event.Command {
 	case 100:
@@ -46,7 +55,9 @@ func ParseEvent(payload []byte) (Event, error) {
 		// A pairing request is not an authentication or transport failure.
 		// Deliver it for an explicit capability notice without attempting pairing.
 	default:
-		return Event{}, ErrUnhandledNotice
+		event.Unsupported = true
+		event.NoticeSize = len(payload)
+		return event, ErrUnhandledNotice
 	}
 	return event, nil
 }

@@ -34,6 +34,7 @@ type Session struct {
 	AppleID string
 	DSID    string
 	Cookies []Cookie
+	Tokens  map[string]string `json:",omitempty"`
 }
 
 type Cookie struct {

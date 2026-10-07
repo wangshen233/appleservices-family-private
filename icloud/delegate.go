@@ -38,6 +38,7 @@ func FetchDelegateTokens(anisetteHeaders map[string]string, username, adsid, pet
 	headers := map[string]string{
 		"Content-Type":      "text/plist",
 		"X-Apple-ADSID":     adsid,
+		"Cookie":            "termsAccepted=true",
 		"User-Agent":        "com.apple.iCloudHelper/282 CFNetwork/1408.0.4 Darwin/22.5.0",
 		"X-Mme-Client-Info": "<MacBookPro18,3> <Mac OS X;13.4.1;22F8> <com.apple.AOSKit/282 (com.apple.accountsd/113)>",
 		"Authorization":     httpx.BasicAuth(username, pet),
@@ -78,7 +79,11 @@ func extractDelegateTokens(resp map[string]any, fallbackDSID string) (DelegateTo
 	sd, ok := mme["service-data"].(map[string]any)
 	if !ok {
 		msg, _ := mme["status-message"].(string)
-		return DelegateTokens{}, fmt.Errorf("icloud: mobileme delegate has no service-data (status-message: %q)", msg)
+		shape := jsonShape(mme, 0)
+		if len(shape) > 400 {
+			shape = shape[:400]
+		}
+		return DelegateTokens{}, fmt.Errorf("icloud: mobileme delegate has no service-data (status-message: %q, delegate: %s)", msg, shape)
 	}
 	tokens, ok := sd["tokens"].(map[string]any)
 	if !ok {
@@ -94,6 +99,12 @@ func extractDelegateTokens(resp map[string]any, fallbackDSID string) (DelegateTo
 	dsid := fallbackDSID
 	if d := coerceDSID(resp["dsid"]); d != "" {
 		dsid = d
+	} else if d := coerceDSID(resp["DsPrsId"]); d != "" {
+		dsid = d
+	} else if accountInfo, ok := resp["appleAccountInfo"].(map[string]any); ok {
+		if d := coerceDSID(accountInfo["dsPrsID"]); d != "" {
+			dsid = d
+		}
 	} else if d := coerceDSID(sd["dsid"]); d != "" {
 		dsid = d
 	}
@@ -108,6 +119,10 @@ func coerceDSID(v any) string {
 		return strconv.FormatUint(d, 10)
 	case int64:
 		return strconv.FormatInt(d, 10)
+	case int:
+		return strconv.Itoa(d)
+	case uint:
+		return strconv.FormatUint(uint64(d), 10)
 	}
 	return ""
 }

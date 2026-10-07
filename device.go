@@ -28,6 +28,7 @@ func (p identityAnisette) Headers() (map[string]string, error) {
 
 type AccountDevice = gsa.AccountDevice
 type DeviceRegistration = gsa.DeviceRegistration
+type CircleReply = gsa.CircleReply
 
 // RegisterDevice announces this installation to the account. It does not prove
 // trusted-device status: callers must verify account-side state and real delivery.
@@ -68,4 +69,17 @@ func (l *Login) RespondToSignIn(transaction string, allow bool) error {
 		return errors.New("appleservices: backend cannot respond to sign-in notifications")
 	}
 	return backend.RespondToSignIn(l.result.SessionPayload, transaction, allow)
+}
+
+func (l *Login) RespondToCircle(reply CircleReply) error {
+	if l.client == nil || l.needsTwoFactor {
+		return errors.New("appleservices: authenticate before responding to Circle")
+	}
+	backend, ok := l.backend.(interface {
+		RespondToCircle(map[string]any, gsa.CircleReply) error
+	})
+	if !ok {
+		return errors.New("appleservices: backend cannot respond to Circle")
+	}
+	return backend.RespondToCircle(l.result.SessionPayload, reply)
 }

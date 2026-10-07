@@ -54,6 +54,7 @@ type Status struct {
 	InstallationVisible  bool      `json:"installation_visible"`
 	RefreshCount         int       `json:"refresh_count"`
 	PairingUnsupported   bool      `json:"pairing_unsupported"`
+	PairingState         string    `json:"pairing_state,omitempty"`
 	PushReconnectCount   int       `json:"push_reconnect_count"`
 	PushIssue            string    `json:"push_issue,omitempty"`
 	FailureStage         string    `json:"failure_stage,omitempty"`
@@ -69,8 +70,9 @@ type view struct {
 	Account      string           `json:"account"`
 }
 type credentials struct {
-	AppleID  string `json:"apple_id"`
-	Password string `json:"password"`
+	AppleID   string `json:"apple_id"`
+	Password  string `json:"password"`
+	TwoFactor string `json:"twofactor,omitempty"`
 }
 
 func New(config Config) (*Server, error) {
@@ -112,7 +114,62 @@ func (s *Server) readStatus() Status {
 }
 func (s *Server) owns(pid int) bool {
 	path := processPath(pid)
-	return path != "" && (strings.EqualFold(filepath.Clean(path), filepath.Clean(s.config.Worker)) || strings.EqualFold(filepath.Clean(path), filepath.Join(filepath.Dir(s.config.Worker), "trusted-device.exe")))
+	// Missing process information is not evidence that a saved PID is alive.
+	// For an inaccessible worker, require a live authenticated control reply.
+	if path == "" {
+		return s.controlAlive(pid)
+	}
+	cleanPath := filepath.Clean(path)
+	// Windows may retain the previous image under a temporary '~' suffix when
+	// the worker binary is rebuilt while that worker is still running.
+	cleanPath = strings.TrimRight(cleanPath, "~")
+	return strings.EqualFold(cleanPath, filepath.Clean(s.config.Worker)) || strings.EqualFold(cleanPath, filepath.Join(filepath.Dir(s.config.Worker), "trusted-device.exe"))
+}
+func (s *Server) controlAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(s.config.Dir, "control.json"))
+	if err != nil {
+		return false
+	}
+	var record control.Record
+	if json.Unmarshal(data, &record) != nil || record.PID != pid {
+		return false
+	}
+	parsed, err := url.Parse(record.URL)
+	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.Port() == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	key, err := hex.DecodeString(record.Token)
+	if err != nil || len(key) != 32 {
+		return false
+	}
+	request, err := http.NewRequest("GET", record.URL+"/view", nil)
+	if err != nil {
+		return false
+	}
+	request.Header.Set("X-Control-Token", record.Token)
+	transport := &http.Transport{Proxy: nil}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(request)
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 200 {
+		return false
+	}
+	var view control.View
+	if json.NewDecoder(io.LimitReader(response.Body, 128*1024)).Decode(&view) != nil {
+		return false
+	}
+	var status struct {
+		PID     int  `json:"pid"`
+		Running bool `json:"running"`
+	}
+	return json.Unmarshal(view.Status, &status) == nil && status.PID == pid && status.Running
 }
 func (s *Server) record() (control.Record, error) {
 	var record control.Record
@@ -209,6 +266,12 @@ func (s *Server) Start(ctx context.Context, creds credentials) control.Result {
 	if strings.TrimSpace(creds.AppleID) == "" || creds.Password == "" {
 		return control.Result{Message: "请输入 Apple 账户和密码"}
 	}
+	if creds.TwoFactor == "" {
+		creds.TwoFactor = "sms"
+	}
+	if creds.TwoFactor != "sms" && creds.TwoFactor != "circle" {
+		return control.Result{Message: "不支持的验证方式"}
+	}
 	s.mu.Lock()
 	s.launching = true
 	s.message = ""
@@ -236,6 +299,7 @@ func (s *Server) Start(ctx context.Context, creds credentials) control.Result {
 	}
 	defer diagnostic.Close()
 	command := exec.Command(s.config.Worker, "-native-adi", "-background", "-control-api", "-gui-auth", "-dir", s.config.Dir, "-adi-dll", s.config.Library, "-python", s.config.Python)
+	command.Args = append(command.Args, "-twofactor", creds.TwoFactor)
 	configureProcess(command)
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
@@ -260,7 +324,7 @@ func (s *Server) Start(ctx context.Context, creds credentials) control.Result {
 func (s *Server) Bootstrap(ctx context.Context, appleID, password string) {
 	if appleID != "" && password != "" {
 		go func() {
-			result := s.Start(ctx, credentials{appleID, password})
+			result := s.Start(ctx, credentials{AppleID: appleID, Password: password})
 			if !result.OK {
 				s.mu.Lock()
 				s.message = result.Message
