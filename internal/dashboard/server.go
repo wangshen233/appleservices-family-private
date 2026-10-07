@@ -183,9 +183,12 @@ func (s *Server) addAccount(ctx context.Context, creds credentials) (control.Res
 		s.accountsMu.Unlock()
 		return control.Result{Message: err.Error()}, ""
 	}
-	// The worker refuses a directory without a provisioned device, so the new
-	// account inherits this machine's ADI identity before it is started.
-	if err := provisionDevice(s.config.Dir, dir, entries); err != nil {
+	// Each account gets its own freshly generated identity. Copying another
+	// account's identity is what Apple rejects with ec=-29004 "possible
+	// environment mismatch", and the rejection permanently invalidates that
+	// identity for every account that presented it.
+	if err := provisionIdentity(dir); err != nil {
+		os.RemoveAll(dir)
 		s.accountsMu.Unlock()
 		return control.Result{Message: err.Error()}, ""
 	}
@@ -251,6 +254,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	return err
 }
+
 // accountStatus reads one account's worker state. Each account has its own
 // runtime.json in its own directory, so one account's worker can never be
 // mistaken for another's.

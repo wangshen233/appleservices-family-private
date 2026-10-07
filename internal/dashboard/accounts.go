@@ -9,8 +9,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-
-	"github.com/Laky-64/appleservices"
 )
 
 // An account owns one device identity and one login session. Each lives in its
@@ -21,12 +19,12 @@ import (
 //	<Root>/accounts/01-primary/    one account's state
 //	<Root>/accounts/02-second/
 type Account struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	AppleID   string    `json:"apple_id"`
-	Dir       string    `json:"dir"`
-	CreatedAt string    `json:"created_at,omitempty"`
-	token     string    // dashboard capability, never persisted here
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	AppleID   string `json:"apple_id"`
+	Dir       string `json:"dir"`
+	CreatedAt string `json:"created_at,omitempty"`
+	token     string // dashboard capability, never persisted here
 	mu        sync.Mutex
 	launching bool
 	message   string
@@ -34,13 +32,13 @@ type Account struct {
 }
 
 type AccountView struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Account     string `json:"account"`
-	State       string `json:"state"`
-	Running     bool   `json:"running"`
-	Authenticated bool `json:"authenticated"`
-	Message     string `json:"message,omitempty"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Account       string `json:"account"`
+	State         string `json:"state"`
+	Running       bool   `json:"running"`
+	Authenticated bool   `json:"authenticated"`
+	Message       string `json:"message,omitempty"`
 }
 
 // registry is the on-disk account list.
@@ -203,35 +201,4 @@ func newAccountDir(root string, entries []*registryEntry) (id, dir string, err e
 		return "", "", err
 	}
 	return id, dir, nil
-}
-
-// provisionDevice gives a new account directory the machine's provisioned
-// device identity. The ADI identity belongs to the machine, not to one Apple
-// ID, so every account on this computer uses the same one — the worker refuses
-// to start a directory that has none.
-func provisionDevice(root, dir string, existing []*registryEntry) error {
-	target := filepath.Join(dir, "device.json")
-	if _, err := os.Stat(target); err == nil {
-		return nil
-	}
-	// Prefer the account already provisioned in the registry root, then any
-	// registered account that has one.
-	candidates := []string{filepath.Join(root, "device.json")}
-	for _, entry := range existing {
-		if entry.Dir != "" {
-			candidates = append(candidates, filepath.Join(entry.Dir, "device.json"))
-		}
-	}
-	for _, source := range candidates {
-		data, err := os.ReadFile(source)
-		if err != nil || len(data) == 0 {
-			continue
-		}
-		var device appleservices.Device
-		if json.Unmarshal(data, &device) != nil || len(device.Identifier) != 16 || len(device.ProvisioningBlob) == 0 {
-			continue
-		}
-		return os.WriteFile(target, data, 0600)
-	}
-	return errors.New("尚未在本机完成过登录，请先添加并登录一个账号，再添加其他账号")
 }

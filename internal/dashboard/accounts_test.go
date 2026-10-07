@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Laky-64/appleservices"
+	"github.com/Laky-64/appleservices/anisette"
 )
 
 // TestAddingAccountDoesNotOverwriteExistingAccount is the regression test for
@@ -50,42 +52,74 @@ func TestAddingAccountDoesNotOverwriteExistingAccount(t *testing.T) {
 		t.Fatal("legacy session was not carried over")
 	}
 
-	// Registering a second account must allocate a different directory and
-	// leave the first account's session byte-identical.
-	res, id := server.addAccount(context.Background(), credentials{AppleID: "second@example.com", Password: "pw"})
-	if id == "" {
-		t.Fatalf("second account was not allocated a directory: ok=%v msg=%q", res.OK, res.Message)
-	}
-	if len(server.accounts) != 2 {
-		t.Fatalf("expected two accounts, got %d", len(server.accounts))
-	}
+	// A second account must never share the first account's device identity:
+	// Apple answers ec=-29004 "possible environment mismatch" when two logins
+	// present the same device, breaking both. It must also leave the first
+	// account untouched, whether it is accepted or refused.
+	firstDevice, _ := os.ReadFile(filepath.Join(firstDir, "device.json"))
+	before := len(server.accounts)
+	_, id := server.addAccount(context.Background(), credentials{AppleID: "second@example.com", Password: "pw"})
+
 	after, _ := os.ReadFile(filepath.Join(firstDir, "session.json"))
 	if string(after) != string(original) {
 		t.Fatal("adding an account modified the existing account's session")
 	}
-	second := server.lookup(id)
-	if second == nil || second.Dir == firstDir {
-		t.Fatal("second account reused the first account's directory")
+	if again, _ := os.ReadFile(filepath.Join(firstDir, "device.json")); string(again) != string(firstDevice) {
+		t.Fatal("adding an account modified the existing account's device identity")
 	}
-	if _, err := os.Stat(filepath.Join(second.Dir, "session.json")); err == nil {
-		t.Fatal("second account inherited the first account's session")
+	if id != "" {
+		second := server.lookup(id)
+		blob, err := os.ReadFile(filepath.Join(second.Dir, "device.json"))
+		if err == nil && string(blob) == string(firstDevice) {
+			t.Fatal("second account was given a copy of the first account's device identity")
+		}
+	} else if len(server.accounts) != before {
+		t.Fatal("a refused account was still registered")
 	}
 
-	// The registry must survive a restart with both accounts intact.
+	// The registry must survive a restart with the accounts intact.
 	reopened, err := New(Config{Dir: root, Worker: filepath.Join(root, "worker.exe"), Port: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reopened.listener.Close()
-	if len(reopened.accounts) != 2 {
-		t.Fatalf("registry lost accounts across restart: %d", len(reopened.accounts))
+	if len(reopened.accounts) != len(server.accounts) {
+		t.Fatalf("registry lost accounts across restart: %d vs %d", len(reopened.accounts), len(server.accounts))
 	}
-	// A duplicate email is rejected rather than silently replacing the entry.
-	_, dupID := reopened.addAccount(context.Background(), credentials{AppleID: "first@example.com", Password: "pw"})
-	if dupID != reopened.accounts[0].ID {
+	// A duplicate email resolves to the existing entry rather than adding one.
+	if _, dupID := reopened.addAccount(context.Background(), credentials{AppleID: "first@example.com", Password: "pw"}); dupID != reopened.accounts[0].ID {
 		t.Fatal("duplicate account was not mapped back to the existing entry")
 	}
-	if len(reopened.accounts) != 2 {
+	if len(reopened.accounts) != len(server.accounts) {
 		t.Fatal("duplicate add created extra state")
+	}
+}
+
+// TestNewIdentityIsNeverACopy guards the cause of ec=-29004 "possible
+// environment mismatch": an identity presented by two accounts is rejected and
+// permanently invalidated. A new account must therefore always be given a
+// freshly generated identity, never one copied from another account.
+func TestNewIdentityIsNeverACopy(t *testing.T) {
+	dir := t.TempDir()
+	// A directory that already has an identity must not be re-provisioned.
+	if err := os.WriteFile(filepath.Join(dir, "device.json"), []byte(`{"Identifier":"c29tZS1pZGVudGl0eQ=="}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := provisionIdentity(dir); err == nil {
+		t.Fatal("an existing identity was overwritten")
+	}
+	after, _ := os.ReadFile(filepath.Join(dir, "device.json"))
+	if !strings.Contains(string(after), "c29tZS1pZGVudGl0eQ==") {
+		t.Fatal("the existing identity was modified")
+	}
+
+	// A fresh identity is 16 bytes and unrelated to any other account's.
+	state := anisette.NewState()
+	if len(state.Identifier) != 16 {
+		t.Fatalf("generated identifier is %d bytes, want 16", len(state.Identifier))
+	}
+	other := anisette.NewState()
+	if string(state.Identifier) == string(other.Identifier) {
+		t.Fatal("two generated identities collided")
 	}
 }

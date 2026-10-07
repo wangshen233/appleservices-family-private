@@ -18,6 +18,7 @@ import (
 	"github.com/Laky-64/appleservices"
 	"github.com/Laky-64/appleservices/anisette"
 	"github.com/Laky-64/appleservices/aps"
+	"github.com/Laky-64/appleservices/gsa"
 	"github.com/Laky-64/appleservices/icloud"
 	"github.com/Laky-64/appleservices/internal/circle"
 	"github.com/Laky-64/appleservices/internal/control"
@@ -26,7 +27,15 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "trusted-device:", err)
+		// Apple's own wording decides whether a rejection means a throttled
+		// account, a refused device identity, or a malformed request; the bare
+		// error code alone leaves the operator guessing.
+		var rejection *gsa.AuthenticationError
+		if errors.As(err, &rejection) {
+			fmt.Fprintln(os.Stderr, "trusted-device:", rejection.Explain())
+		} else {
+			fmt.Fprintln(os.Stderr, "trusted-device:", err)
+		}
 		os.Exit(1)
 	}
 }
