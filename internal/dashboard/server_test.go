@@ -127,3 +127,26 @@ func TestDeadSavedPIDDoesNotClaimOnlineOrSkipLogin(t *testing.T) {
 		t.Fatal("stale capability prevented a new login")
 	}
 }
+
+func TestLastProcessErrorDoesNotExposeLogSecrets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.err")
+	if err := os.WriteFile(path, []byte("first\n\n  second   failure\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastProcessError(path); got == "" || strings.Contains(got, "second") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestReconnectRejectsDifferentAccountBeforeStartingWorker(t *testing.T) {
+	s := &Server{}
+	a := &Account{AppleID: "owner@example.test", Dir: t.TempDir()}
+	result := s.startAccount(context.Background(), a, credentials{AppleID: "other@example.test", Password: "test"})
+	if result.OK || !strings.Contains(result.Message, "不一致") {
+		t.Fatal("different account accepted")
+	}
+	entries, _ := os.ReadDir(a.Dir)
+	if len(entries) != 0 {
+		t.Fatal("rejected login changed account state")
+	}
+}

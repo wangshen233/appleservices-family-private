@@ -313,6 +313,9 @@ func run() (runErr error) {
 		}
 		if panel != nil && *guiAuth {
 			status.State, status.VerificationRequired = "awaiting_sms", true
+			if factor == appleservices.TrustedDevice {
+				status.State = "awaiting_device_code"
+			}
 			if err := status.save(*dir); err != nil {
 				return err
 			}

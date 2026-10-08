@@ -76,6 +76,7 @@ type view struct {
 	Launching    bool             `json:"launching"`
 	Message      string           `json:"message"`
 	Account      string           `json:"account"`
+	LoginAccount string           `json:"login_account,omitempty"`
 	Accounts     []AccountView    `json:"accounts,omitempty"`
 	Selected     string           `json:"selected,omitempty"`
 }
@@ -434,6 +435,7 @@ func (s *Server) snapshotFor(ctx context.Context, id string) view {
 	result.Selected = id
 	if account != nil {
 		result.Selected = account.ID
+		result.LoginAccount = account.AppleID
 	}
 	var session struct {
 		AppleID string `json:"appleId"`
@@ -469,6 +471,12 @@ func (s *Server) startAccount(ctx context.Context, account *Account, creds crede
 	if account == nil {
 		return control.Result{Message: "账号不存在"}
 	}
+	if creds.AppleID == "" {
+		creds.AppleID = account.AppleID
+	}
+	if !strings.EqualFold(strings.TrimSpace(creds.AppleID), account.AppleID) {
+		return control.Result{Message: "登录账号与所选工作区不一致，请使用添加账号"}
+	}
 	return s.startIn(ctx, account.Dir, creds, account)
 }
 
@@ -477,6 +485,7 @@ func (s *Server) startIn(ctx context.Context, dir string, creds credentials, acc
 		return control.Result{Message: "正在启动，请稍等"}
 	}
 	defer s.launchMu.Unlock()
+	s.setMessage(account, "")
 	current := s.readStatusFrom(dir)
 	if current.Running {
 		if _, err := s.recordFor(dir); err == nil {
@@ -489,7 +498,7 @@ func (s *Server) startIn(ctx context.Context, dir string, creds credentials, acc
 	if creds.TwoFactor == "" {
 		creds.TwoFactor = "sms"
 	}
-	if creds.TwoFactor != "sms" && creds.TwoFactor != "circle" {
+	if creds.TwoFactor != "sms" && creds.TwoFactor != "circle" && creds.TwoFactor != "trusted-device" {
 		return control.Result{Message: "不支持的验证方式"}
 	}
 	s.setLaunching(account, true)
@@ -531,10 +540,38 @@ func (s *Server) startIn(ctx context.Context, dir string, creds credentials, acc
 	}
 	go func() {
 		if err := command.Wait(); err != nil {
-			s.setMessage(account, "后台异常停止，请查看状态并重新连接")
+			message := "后台异常停止，请重新连接"
+			if detail := lastProcessError(diagnostic.Name()); detail != "" {
+				message += "：" + detail
+			}
+			s.setMessage(account, message)
 		}
 	}()
 	return control.Result{OK: true, Message: "正在连接 Apple，请稍等"}
+}
+
+func lastProcessError(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		// Never forward arbitrary stderr (which can contain credentials).
+		switch {
+		case strings.Contains(line, "a provisioned device state is required"):
+			return "所选目录缺少有效设备身份，请选择已有账号，或通过添加账号建立身份"
+		case strings.Contains(line, "APPLESERVICES_APPLEID and APPLESERVICES_PASSWORD are required"):
+			return "请重新输入当前账号密码"
+		default:
+			return "请检查该账号的本机诊断日志；设备身份仍保留"
+		}
+	}
+	return ""
 }
 
 // setLaunching and setMessage record progress on the account when there is one,
@@ -682,7 +719,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !readJSON(w, r, &body) {
 				return
 			}
+			if body.Account == "" {
+				body.Account = r.URL.Query().Get("account")
+			}
 			dir := s.config.Dir
+			if body.Account == "" {
+				if selected := s.lookup(""); selected != nil {
+					body.Account = selected.ID
+				}
+			}
 			if body.Account != "" {
 				account := s.lookup(body.Account)
 				if account == nil {
