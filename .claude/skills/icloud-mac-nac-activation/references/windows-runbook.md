@@ -82,6 +82,15 @@ The misleadingly named `-sms-code-file` is also used by device mode. The file mu
 
 For explicitly chosen SMS delivery, omit `-trusted-device-code` and use the same private-file handoff. If Apple reports `tooManyCodesSent=true` / `-22981`, stop requesting SMS. Do not infer recovery duration. If no 2FA is required, the same command completes directly. Local generation is a separate opt-in diagnostic and requires demonstrated acceptance for the same account; device trust alone is insufficient.
 
+When the owner has only this account's local diagnostic Mac, test delivery without approving a notification or completing the requester login:
+
+```powershell
+.\bin\trustedcodecheck.exe -dir $accountDir -work "$runDir/push-observation" `
+  -listen-for 30s -push-only -saved-receiver-binding
+```
+
+This mode uses the saved account binding only to attribute APS events; it does not establish current GSA trust. Report APS connection, matching token, received sign-in notices, and server acceptance of any separately tested local code as independent facts. A connected APS channel with zero notices does not make the Mac a working trusted device. A six-digit local output rejected by Apple also fails the 2FA acceptance requirement; stop instead of repeatedly generating codes.
+
 Keep the completed `$runDir/gsa.json`. Code verification can return a usable PET directly; immediately resume this checkpoint for terms and delegate. A later password login may invalidate it or change the result.
 
 ## 5. Terms, then v2 delegate

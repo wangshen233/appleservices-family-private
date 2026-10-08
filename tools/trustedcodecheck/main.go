@@ -74,9 +74,13 @@ func run() error {
 	work := flag.String("work", "", "existing owner-only private test directory")
 	wait := flag.Duration("listen-for", 45*time.Second, "bounded delivery observation after triggering one request")
 	pushOnly := flag.Bool("push-only", false, "observe delivery without submitting a code or completing the requester login")
+	savedReceiver := flag.Bool("saved-receiver-binding", false, "listen using the bound account and APS state without renewing receiver GSA")
 	flag.Parse()
 	if *dir == "" || *work == "" || *wait < time.Second || *wait > time.Minute {
 		return errors.New("account, private work directory and bounded listen time required")
+	}
+	if *savedReceiver && !*pushOnly {
+		return errors.New("saved receiver binding is observation-only and requires push-only")
 	}
 	username, password := os.Getenv("APPLESERVICES_APPLEID"), os.Getenv("APPLESERVICES_PASSWORD")
 	os.Unsetenv("APPLESERVICES_APPLEID")
@@ -107,22 +111,27 @@ func run() error {
 		return err
 	}
 	defer receiver.Close()
-	receiverGSA, err := gsaClient(receiver, token)
-	if err != nil {
-		return err
+	adsid := session.DSID
+	if !*savedReceiver {
+		receiverGSA, err := gsaClient(receiver, token)
+		if err != nil {
+			return err
+		}
+		receiverAuth, err := receiverGSA.Login(username, password)
+		if err != nil {
+			return err
+		}
+		if receiverAuth.NeedsTwoFactor {
+			return errors.New("receiver session needs 2FA; no code requested")
+		}
+		adsid, _ = receiverAuth.SessionPayload["adsid"].(string)
+		if adsid == "" || adsid != session.DSID {
+			return errors.New("receiver authenticated account mismatch")
+		}
+		fmt.Println("receiver GSA authenticated; same trusted Mac; no new 2FA required")
+	} else {
+		fmt.Println("receiver uses saved account binding; GSA trust is not inferred")
 	}
-	receiverAuth, err := receiverGSA.Login(username, password)
-	if err != nil {
-		return err
-	}
-	if receiverAuth.NeedsTwoFactor {
-		return errors.New("receiver session needs 2FA; no code requested")
-	}
-	adsid, _ := receiverAuth.SessionPayload["adsid"].(string)
-	if adsid == "" || adsid != session.DSID {
-		return errors.New("receiver authenticated account mismatch")
-	}
-	fmt.Println("receiver GSA authenticated; same trusted Mac; no new 2FA required")
 	var push listener
 	if saved, err := os.ReadFile(filepath.Join(*dir, "push.json")); err == nil {
 		var state aps.State
