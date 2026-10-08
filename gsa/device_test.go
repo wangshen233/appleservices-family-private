@@ -7,10 +7,43 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"howett.net/plist"
 )
+
+func TestCurrentDeviceDetailsAreReadOnlyAndBoundToAppleLink(t *testing.T) {
+	c := NewClient(deviceTestAnisette{})
+	calls := 0
+	c.transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.Method != http.MethodGet || r.URL.Host != "gsa.apple.com" || r.URL.Path != "/appleid/account/manage/security/devices/test-device" {
+			t.Fatal("device details used a write operation or different target")
+		}
+		if r.Header.Get("X-Apple-Identity-Token") != base64.StdEncoding.EncodeToString([]byte("test-account:test-identity")) {
+			t.Fatal("wrong account identity binding")
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"trustedDevice":true,"serialNumber":"TEST01234567"}`))}, nil
+	})
+	device := AccountDevice{ID: "test-device", CurrentDevice: true, DeviceDetailHTTPMethod: http.MethodGet, DeviceDetailURI: "https://gsa.apple.com/appleid/account/manage/security/devices/test-device"}
+	payload := map[string]any{"adsid": "test-account", "GsIdmsToken": "test-identity"}
+	for _, invalid := range []AccountDevice{
+		{ID: device.ID, CurrentDevice: false, DeviceDetailHTTPMethod: device.DeviceDetailHTTPMethod, DeviceDetailURI: device.DeviceDetailURI},
+		{ID: device.ID, CurrentDevice: true, DeviceDetailHTTPMethod: http.MethodPost, DeviceDetailURI: device.DeviceDetailURI},
+		{ID: device.ID, CurrentDevice: true, DeviceDetailHTTPMethod: http.MethodGet, DeviceDetailURI: "https://example.test/appleid/account/manage/security/devices/test-device"},
+		{ID: device.ID, CurrentDevice: true, DeviceDetailHTTPMethod: http.MethodGet, DeviceDetailURI: device.DeviceDetailURI + "?action=remove"},
+		{ID: "different-device", CurrentDevice: true, DeviceDetailHTTPMethod: http.MethodGet, DeviceDetailURI: device.DeviceDetailURI},
+	} {
+		if _, err := c.AccountDeviceDetails(payload, invalid); err == nil || calls != 0 {
+			t.Fatal("followed an unbound or mutable device link")
+		}
+	}
+	details, err := c.AccountDeviceDetails(payload, device)
+	if err != nil || calls != 1 || details["trustedDevice"] != true || details["serialNumber"] != "TEST01234567" {
+		t.Fatal("failed to preserve Apple's explicit device trust state")
+	}
+}
 
 func TestRegistrationRequiresRealLengthTokenAndChecksServerFailure(t *testing.T) {
 	calls := 0

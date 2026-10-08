@@ -42,6 +42,13 @@
 - 各使用新配置复核一次 GSA：两个账号的密码和服务器 proof 均通过，短信配置仍返回 HTTP 423、`-22981`、`tooManyCodesSent=true`、`noTrustedDevices=true`。因此隔离修正不能被报告为短信限制解除或 iCloud 激活成功；未继续请求发送短信，未购买。
 - `nativeadi`、`aps`、`cmd/trusted-device` 回归测试通过。独立 Mac APS 与 NAC 的实测不替代 MME/配额验收。
 
+### 02-account 的账号设备信任核验
+
+- 用户要求核验本地模拟 Mac 是否受信任。旧 GSA checkpoint 查询设备列表返回 HTTP 401；随后用相同账号和原 Mac 身份新登录，只执行设备 GET 查询，没有登记设备、请求短信或同意登录通知。
+- Apple 返回 10 条设备摘要，其中本次 Mac 为 `currentDevice=true`、`supportsVerificationCodes=true`。摘要不含序列号和显式 trust 字段，不能据此把缺失字段解释成不受信任。
+- 沿 Apple 返回且校验过的当前设备 GET 详情链接查询，序列号与本地配置匹配，返回 `trustedDevice=true`、`untrusted=false`、`supportsVerificationCodes=true`，确认该模拟 Mac 已在账号内并被标记为受信任。
+- 同一详情的 `pushDevice=false`。受信任和支持验证码的标志不能替代当前本地客户端接收推送验证码的实测。全部原始设备数据仅保存到私有文件，文档不保存设备 ID、序列号或令牌。
+
 独立 `accountsetupcheck -delegate-only` 提交流程已成功。严格 worker 的复测仍返回 `HTTP 409 / ICLOUD_UNSUPPORTED_DEVICE / reason-code 3001`；这表示 worker 的默认会话或请求上下文仍与已验证的独立探针不同，不能覆盖独立探针已经取得的 MME 和配额证据。
 
 原文的“唯一根因已经定位”“代码侧彻底排除”“必须先登录真机”均超出了现有证据。原文快照保留在本地 `.cache/handoff-icloud-activation-original.md`，其中账号资料不应发布。

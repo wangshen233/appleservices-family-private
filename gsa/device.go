@@ -8,6 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -31,12 +34,15 @@ func (e *DeviceRequestError) Error() string {
 // AccountDevice describes the account's registered devices. An entry alone is
 // not proof that Apple accepts it as a verification-code receiver.
 type AccountDevice struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	ModelName       string `json:"modelName"`
-	CurrentDevice   bool   `json:"currentDevice"`
-	SerialNumber    string `json:"serialNumber"`
-	IsTrustedDevice *bool  `json:"isTrustedDevice"`
+	ID                        string `json:"id"`
+	Name                      string `json:"name"`
+	ModelName                 string `json:"modelName"`
+	CurrentDevice             bool   `json:"currentDevice"`
+	SerialNumber              string `json:"serialNumber"`
+	IsTrustedDevice           *bool  `json:"isTrustedDevice"`
+	SupportsVerificationCodes *bool  `json:"supportsVerificationCodes"`
+	DeviceDetailURI           string `json:"deviceDetailUri"`
+	DeviceDetailHTTPMethod    string `json:"deviceDetailHttpMethod"`
 }
 
 func payloadToken(payload map[string]any, service string) string {
@@ -69,6 +75,18 @@ func (c *Client) accountRequest(method, endpoint string, headers map[string]stri
 	}
 	defer resp.Body.Close()
 	data, readErr := readAccountResponse(resp)
+	if directory := os.Getenv("APPLESERVICES_ACCOUNT_DEVICE_DIAGNOSTIC_DIR"); directory != "" && method == http.MethodGet && endpoint == deviceListURL {
+		path := filepath.Join(directory, fmt.Sprintf("device-summary-%d.json", time.Now().UnixNano()))
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			return nil, errors.New("gsa: cannot create private account-device diagnostic")
+		}
+		_, writeErr := file.Write(data)
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			return nil, errors.New("gsa: cannot save private account-device diagnostic")
+		}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		failure := &DeviceRequestError{HTTPStatus: resp.StatusCode}
 		var decoded map[string]any
@@ -211,6 +229,37 @@ func (c *Client) AccountDevices(payload map[string]any) ([]AccountDevice, error)
 		return nil, errors.New("gsa: device list response missing manageDevices")
 	}
 	return response.ManageDevices.Devices, nil
+}
+
+// AccountDeviceDetails follows only Apple's GET detail link for the current
+// device returned by AccountDevices. It cannot remove or register a device.
+func (c *Client) AccountDeviceDetails(payload map[string]any, device AccountDevice) (map[string]any, error) {
+	endpoint, err := url.Parse(device.DeviceDetailURI)
+	if err != nil || !device.CurrentDevice || device.ID == "" || device.DeviceDetailHTTPMethod != http.MethodGet || endpoint.Scheme != "https" || endpoint.Host != "gsa.apple.com" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || endpoint.Path != "/appleid/account/manage/security/devices/"+device.ID {
+		return nil, errors.New("gsa: unsupported current-device detail link")
+	}
+	headers, err := c.authenticatedDeviceHeaders(payload)
+	if err != nil {
+		return nil, err
+	}
+	token, _ := payload["GsIdmsToken"].(string)
+	if token == "" {
+		token = payloadToken(payload, "com.apple.gs.appleid.auth")
+	}
+	if token == "" {
+		return nil, errors.New("gsa: device detail requires an account identity token")
+	}
+	headers["X-Apple-Identity-Token"] = base64.StdEncoding.EncodeToString([]byte(payload["adsid"].(string) + ":" + token))
+	headers["Accept"] = "application/json"
+	data, err := c.accountRequest(http.MethodGet, endpoint.String(), headers, nil)
+	if err != nil {
+		return nil, err
+	}
+	var response map[string]any
+	if json.Unmarshal(data, &response) != nil {
+		return nil, errors.New("gsa: device detail returned invalid JSON")
+	}
+	return response, nil
 }
 
 func (c *Client) RespondToSignIn(payload map[string]any, transaction string, allow bool) error {

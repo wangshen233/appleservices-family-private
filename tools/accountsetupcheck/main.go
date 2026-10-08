@@ -45,6 +45,7 @@ func run() error {
 	dir := flag.String("dir", "", "account state directory")
 	nativeProfile := flag.String("native-profile", "", "explicit isolated native profile for the same bound device; default is account native-adi")
 	nativeOnly := flag.Bool("native-only", false, "validate only this bound profile's native ADI; no account login, SMS, terms or delegate")
+	devicesOnly := flag.Bool("devices-only", false, "read account devices after authentication; no registration, SMS or account writes")
 	dump := flag.String("dump", "", "private output for account setup response")
 	checkpoint := flag.String("checkpoint", "", "private output for fresh GSA session; not iCloud acceptance")
 	accept := flag.Bool("accept-terms", false, "submit the terms update only after the account owner explicitly agrees")
@@ -63,6 +64,9 @@ func run() error {
 	flag.Parse()
 	if *dir == "" || (*dump == "" && !*nativeOnly) {
 		return fmt.Errorf("dir and private dump are required")
+	}
+	if *devicesOnly && (*nativeOnly || *accept || *delegateOnly || *requestSMSOnly || *localTrustedCode || *smsAlreadySent || *codeFile != "") {
+		return fmt.Errorf("devices-only cannot perform registration, second-factor requests or account writes")
 	}
 	for _, path := range []string{*dump, *checkpoint, *icloudCheckpoint} {
 		if path != "" {
@@ -181,6 +185,9 @@ func run() error {
 		}
 	}
 	if auth.NeedsTwoFactor {
+		if *devicesOnly {
+			return fmt.Errorf("device query requires renewed 2FA; no verification code requested")
+		}
 		fmt.Printf("Mac GSA password accepted; continuation=%s; full authentication pending\n", auth.TwoFactorMethod)
 		adsid, _ := auth.SessionPayload["adsid"].(string)
 		idms, _ := auth.SessionPayload["GsIdmsToken"].(string)
@@ -270,6 +277,58 @@ func run() error {
 				}
 			}
 		}
+	}
+	if *devicesOnly {
+		devices, err := client.AccountDevices(auth.SessionPayload)
+		if err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(devices)
+		if err != nil || writePrivateFile(*dump, encoded) != nil {
+			return fmt.Errorf("cannot save private device list")
+		}
+		matches := 0
+		currentMatches := 0
+		for _, entry := range devices {
+			if entry.CurrentDevice {
+				currentMatches++
+				trusted := "not-reported"
+				if entry.IsTrustedDevice != nil {
+					trusted = fmt.Sprintf("%t", *entry.IsTrustedDevice)
+				}
+				fmt.Printf("Apple marks this request's Mac as current device; trusted=%s\n", trusted)
+				if entry.SupportsVerificationCodes != nil {
+					fmt.Printf("current Mac supportsVerificationCodes=%t\n", *entry.SupportsVerificationCodes)
+				}
+				if entry.DeviceDetailURI != "" {
+					details, err := client.AccountDeviceDetails(auth.SessionPayload, entry)
+					if err != nil {
+						return err
+					}
+					data, err := json.Marshal(details)
+					if err != nil || writePrivateFile(*dump+".current-detail.json", data) != nil {
+						return fmt.Errorf("cannot save private current-device detail")
+					}
+					fmt.Println("current Mac device detail read; private output saved")
+					if trusted, ok := details["trustedDevice"].(bool); ok {
+						fmt.Printf("Apple device detail trustedDevice=%t; local-serial-matches=%t\n", trusted, details["serialNumber"] == device.SerialNumber)
+					}
+					if push, ok := details["pushDevice"].(bool); ok {
+						fmt.Printf("Apple device detail pushDevice=%t\n", push)
+					}
+				}
+			}
+			if device.SerialNumber != "" && strings.EqualFold(entry.SerialNumber, device.SerialNumber) {
+				matches++
+				trusted := "not-reported"
+				if entry.IsTrustedDevice != nil {
+					trusted = fmt.Sprintf("%t", *entry.IsTrustedDevice)
+				}
+				fmt.Printf("local Mac matched by serial; current-device=%t; trusted=%s\n", entry.CurrentDevice, trusted)
+			}
+		}
+		fmt.Printf("account devices read; device-count=%d; local-serial-matches=%d; current-device-count=%d; no account writes\n", len(devices), matches, currentMatches)
+		return nil
 	}
 	pet, err := icloud.PETFromSPD(auth.SessionPayload)
 	if err != nil {
