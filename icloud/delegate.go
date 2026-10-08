@@ -12,6 +12,7 @@ import (
 	"github.com/Laky-64/appleservices/internal/httpx"
 	"github.com/Laky-64/appleservices/internal/uuid"
 	"github.com/Laky-64/http"
+	"github.com/Laky-64/http/types"
 	"howett.net/plist"
 )
 
@@ -40,9 +41,16 @@ func FetchDelegateTokens(anisetteHeaders map[string]string, username, adsid, pet
 	anisetteHeaders = httpx.NormalizeAnisetteHeaders(anisetteHeaders)
 
 	// The iosbuddy path takes the Apple ID and PET in the body and answers a
-	// refusal with a generic message. The v2 sign-in path, which a working
-	// client uses, takes a delegates/protocol_version/user_info document and
-	// reports localizedError and description instead.
+	// refusal with a generic message. The other two paths report the reason:
+	// prefpane names it in ErrorID and localizedError, and the v2 sign-in
+	// endpoint, which a working client uses, takes a
+	// delegates/protocol_version/user_info document.
+	switch strings.TrimSpace(os.Getenv("APPLESERVICES_DELEGATE_PATH")) {
+	case "prefpane":
+		return fetchDelegateTokensAt(anisetteHeaders, username, adsid, pet, "/setup/prefpane/loginDelegates")
+	case "v2":
+		return fetchDelegateTokensV2(anisetteHeaders, username, adsid, pet)
+	}
 	if strings.TrimSpace(os.Getenv("APPLESERVICES_DELEGATE_V2")) != "" {
 		return fetchDelegateTokensV2(anisetteHeaders, username, adsid, pet)
 	}
@@ -75,22 +83,59 @@ func FetchDelegateTokens(anisetteHeaders map[string]string, username, adsid, pet
 		http.Headers(headers),
 		http.Timeout(30*time.Second),
 	)
+	return finishDelegate(result, err, adsid, "loginDelegates")
+}
+
+// fetchDelegateTokensAt posts the same document to a named delegate path.
+// The prefpane path is worth using while diagnosing: unlike iosbuddy it names
+// the reason in ErrorID and localizedError instead of a generic message.
+func fetchDelegateTokensAt(anisetteHeaders map[string]string, username, adsid, pet, path string) (DelegateTokens, error) {
+	body := map[string]any{
+		"apple-id":  username,
+		"delegates": map[string]any{"com.apple.mobileme": map[string]any{}},
+		"password":  pet,
+		"client-id": uuid.New(),
+	}
+	var buf bytes.Buffer
+	if err := plist.NewEncoder(&buf).Encode(body); err != nil {
+		return DelegateTokens{}, fmt.Errorf("icloud: encode delegate body: %w", err)
+	}
+	headers := map[string]string{
+		"Content-Type":      "text/plist",
+		"X-Apple-ADSID":     adsid,
+		"User-Agent":        "com.apple.iCloudHelper/282 CFNetwork/1408.0.4 Darwin/22.5.0",
+		"X-Mme-Client-Info": "<MacBookPro18,3> <Mac OS X;13.4.1;22F8> <com.apple.AOSKit/282 (com.apple.accountsd/113)>",
+		"Authorization":     httpx.BasicAuth(username, pet),
+	}
+	for k, v := range anisetteHeaders {
+		headers[k] = v
+	}
+	result, err := http.ExecuteRequest(setupBaseFor(username)+path,
+		http.Method("POST"),
+		http.Body(buf.Bytes()),
+		http.Headers(headers),
+		http.Timeout(30*time.Second),
+	)
+	return finishDelegate(result, err, adsid, path)
+}
+
+// finishDelegate keeps the raw response, reports a transport failure, and hands
+// the decoded document to the token extractor.
+func finishDelegate(result *types.HTTPResult, err error, adsid, label string) (DelegateTokens, error) {
+	if result != nil {
+		if path := strings.TrimSpace(os.Getenv("APPLESERVICES_DELEGATE_DUMP")); path != "" {
+			_ = os.WriteFile(path, result.Body, 0o600)
+		}
+	}
 	if err != nil {
-		return DelegateTokens{}, fmt.Errorf("icloud: loginDelegates request: %w", err)
+		return DelegateTokens{}, fmt.Errorf("icloud: %s request: %w", label, err)
 	}
 	if result.StatusCode != 200 {
-		return DelegateTokens{}, fmt.Errorf("icloud: loginDelegates status %d", result.StatusCode)
+		return DelegateTokens{}, fmt.Errorf("icloud: %s status %d", label, result.StatusCode)
 	}
-
 	var decoded map[string]any
 	if _, err := plist.Unmarshal(result.Body, &decoded); err != nil {
-		return DelegateTokens{}, fmt.Errorf("icloud: decode loginDelegates response: %w", err)
-	}
-	if path := strings.TrimSpace(os.Getenv("APPLESERVICES_DELEGATE_DUMP")); path != "" {
-		// A refusal explains itself in localizedError and description, which the
-		// per-delegate status does not carry. Keep the raw plist so a failure
-		// stays diagnosable instead of collapsing into "status 1".
-		_ = os.WriteFile(path, result.Body, 0o600)
+		return DelegateTokens{}, fmt.Errorf("icloud: decode %s response: %w", label, err)
 	}
 	return extractDelegateTokens(decoded, adsid)
 }
