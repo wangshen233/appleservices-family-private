@@ -10,6 +10,26 @@ description: 通过苹果原生商店链路完成 iCloud+ 订阅购买、关闭�
 
 全程使用原生商店协议（plist over HTTPS），不依赖浏览器、不驱动官方客户端 UI。
 
+## 当前项目入口与证据边界
+
+本文的具体成功参数来自一次已完成购买的历史实测。HTTP 状态、放行率、令牌寿命及某个失败的归因都是该次观测，不能保证另一个账号或当前服务器具有相同行为。尤其不能仅凭一次 delegate 失败断言账号未激活；激活验收使用 `.claude/skills/icloud-mac-nac-activation/SKILL.md` 的有效 MME 与实时配额标准。
+
+取得用户对精确套餐的购买授权后，从项目根目录运行：
+
+```powershell
+go build -o bin/icloudpurchase.exe ./tools/icloudpurchase
+.\bin\icloudpurchase.exe -claude-skill -native-store -confirm-cn-50gb `
+  -dir state/accounts/<selected-account> `
+  -accepted <private-accepted-icloud.json> -journal <new-private-attempt.jsonl> `
+  -local-store-code -store-session-out <new-private-store.json>
+```
+
+凭据通过进程环境输入。所有输出路径必须位于仅当前用户可访问的 Git 忽略目录。`-local-store-code` 生成成功不代表商店接受；仅在 Apple 明确请求 2FA 后向同一会话附加新验证码。没有本账号已验证的本地码时使用新的用户设备码，不能借用其他账号的码。
+
+可用 `-store-check-only` 只验证商店认证，或用 `-store-session-in` 复用本账号和物理 GUID 绑定的有效商店 checkpoint。该模式最多执行 20 次认证路由尝试；应用错误及 429 停止，购买或不明确认响应不自动重放。
+
+`APPLESERVICES_SKILL_STORE_PROFILE=compact`、附加 `-signed-store` 或 `-appstore-profile` 是显式诊断选项，不是已验证的购买修复。当前目标曾在签名 App Store 对照收到空体 406/400，其他对照仍为通用空白/HTML 响应，均未取得商店令牌。不要把通用 HTTP 错误归因成密码或验证码错误，也不要重复同一失败实验而没有新证据。
+
 ## 关键前提
 
 ### 物理网卡 GUID

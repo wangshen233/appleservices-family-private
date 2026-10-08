@@ -28,8 +28,8 @@ func run() error {
 	nativeStore := flag.Bool("native-store", false, "use this account Mac's authenticated native Store and exact returned confirmation")
 	localStoreCode := flag.Bool("local-store-code", false, "generate a code on this account's existing trusted Mac; never request SMS")
 	storeRetries := flag.Int("store-auth-retries", 0, "at most 3 routing-error retries during Store authentication; never retry a purchase")
-	signedStore := flag.Bool("signed-store", false, "SAP-sign this Mac's native Store authentication")
-	appStoreProfile := flag.Bool("appstore-profile", false, "use the exact Apple bag endpoint and account Mac App Store headers with SAP")
+	signedStore := flag.Bool("signed-store", false, "SAP-sign native Store authentication; claude-skill uses the physical Store GUID")
+	appStoreProfile := flag.Bool("appstore-profile", false, "diagnose signed App Store authentication using the Apple bag endpoint and account headers")
 	claudeSkill := flag.Bool("claude-skill", false, "follow .claude icloud-plus-purchase with physical Store GUID and native plist flow")
 	storeSessionOut := flag.String("store-session-out", "", "new owner-only output retaining this account's Store credentials and cookies")
 	storeSessionIn := flag.String("store-session-in", "", "private Store session for this account and physical GUID")
@@ -159,7 +159,12 @@ func run() error {
 			} else if storeCode != "" {
 				provider = func() (string, error) { return storeCode, nil }
 			}
-			commerce, err = icloud.AuthenticateSkillStore(ctx, username, password, provider)
+			if *signedStore || *appStoreProfile {
+				fmt.Println("signed current-bag Store authentication; physical GUID; same cookie jar")
+				commerce, err = icloud.AuthenticateSignedSkillStore(ctx, username, password, headers, *appStoreProfile, provider)
+			} else {
+				commerce, err = icloud.AuthenticateSkillStore(ctx, username, password, provider)
+			}
 		} else if *appStoreProfile {
 			fmt.Println("native App Store profile; signed exact Apple bag endpoint; account Mac retained")
 			commerce, err = icloud.AuthenticateAppStoreForHardware(ctx, username, password, storeCode, headers, nativeadi.SyntheticMACAddress(device.Identifier), *storeRetries)

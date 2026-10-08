@@ -1,6 +1,7 @@
 package icloud
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -10,6 +11,37 @@ import (
 
 	"howett.net/plist"
 )
+
+func TestSignedSkillStoreSignsEachChallengeBodyAndStopsOnApplicationHTTP(t *testing.T) {
+	for _, status := range []int{400, 406, 429} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			calls := 0
+			signer := &testStoreSigner{}
+			client := &http.Client{Transport: testStoreTransport(func(req *http.Request) (*http.Response, error) {
+				calls++
+				body, _ := io.ReadAll(req.Body)
+				if !bytes.Equal(body, signer.body) || req.Header.Get("X-Apple-ActionSignature") != "c2lnbmVk" || req.Header.Get("Content-Type") != "application/x-apple-plist" || req.Header.Get("Accept") != "*/*" {
+					t.Fatal("signed request did not retain its exact body or response negotiation")
+				}
+				responseStatus := 200
+				response := `<plist><dict><key>customerMessage</key><string>MZFinance.BadLogin.Configurator_message</string></dict></plist>`
+				if calls == 2 {
+					var fields map[string]any
+					plist.Unmarshal(body, &fields)
+					if fields["password"] != "test-password123456" || fields["guid"] != "TEST-GUID" {
+						t.Fatal("challenge changed physical binding or omitted the new code")
+					}
+					responseStatus, response = status, ""
+				}
+				return &http.Response{StatusCode: responseStatus, Request: req, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(response))}, nil
+			})}
+			_, err := authenticateSkillStoreConfigured(context.Background(), client, "https://auth.itunes.apple.com/auth/v1/native/fast/", "TEST-GUID", "owner@example.test", "test-password", storeMacUserAgent, nil, signer, func() (string, error) { return "123456", nil })
+			if err == nil || calls != 2 {
+				t.Fatalf("application rejection was retried: calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
 
 func TestSkillPurchasePreservesFullConfirmationAndVerifiesSubscription(t *testing.T) {
 	buys := 0

@@ -3,6 +3,7 @@ package icloud
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,10 +18,18 @@ import (
 	"time"
 
 	"github.com/Laky-64/appleservices/internal/backgroundexec"
+	"github.com/Laky-64/appleservices/internal/sap"
 	"howett.net/plist"
 )
 
 const skillStoreAgent = "Configurator/2.18 (Macintosh; OS X 15.4.1; 24E263) AppleWebKit/0621.1.15.11.10"
+
+func skillAuthenticationAgent() string {
+	if os.Getenv("APPLESERVICES_SKILL_STORE_PROFILE") == "compact" {
+		return "Configurator/2.18 (Macintosh; OS X 15.4.1; 24E263)"
+	}
+	return skillStoreAgent
+}
 
 type skillPythonTransport struct{}
 
@@ -90,8 +99,45 @@ func AuthenticateSkillStore(ctx context.Context, appleID, password string, codeP
 	return authenticateSkillStoreClient(ctx, client, guid, appleID, password, codeProvider)
 }
 
+// AuthenticateSignedSkillStore keeps the physical Store identity while testing
+// the signed native endpoint returned by Apple's current App Store bag.
+func AuthenticateSignedSkillStore(ctx context.Context, appleID, password string, headers map[string]string, appStoreProfile bool, codeProvider func() (string, error)) (*StoreCommerceSession, error) {
+	guid, hardware, err := storeHardwareIdentity()
+	if err != nil || isVirtualInterface("", hardware) {
+		return nil, &StorageError{Stage: "purchase-store-physical-hardware"}
+	}
+	client := &http.Client{Jar: mustCookieJar(), Transport: skillHTTPTransport(), Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	agent := skillAuthenticationAgent()
+	if appStoreProfile {
+		agent = storeMacUserAgent
+	} else {
+		headers = nil
+	}
+	bag, err := loadStoreSAPBagForAgent(ctx, client, guid, agent, appStoreProfile)
+	if err != nil {
+		client.CloseIdleConnections()
+		return nil, &StorageError{Stage: "purchase-store-bag"}
+	}
+	u, _ := url.Parse(bag.AuthEndpoint)
+	if u.Path == "/auth/v1/native/fast" {
+		u.Path += "/"
+		bag.AuthEndpoint = u.String()
+	}
+	fmt.Printf("Apple bag Store endpoint: %s\n", safeEndpointLabel(u))
+	signer, err := sap.NewSigner(ctx, sap.Config{SetupURL: bag.SetupURL, CertificateURL: bag.CertificateURL, Version: bag.Version, HardwareID: hardware})
+	if err != nil {
+		client.CloseIdleConnections()
+		return nil, &StorageError{Stage: "purchase-store-sap"}
+	}
+	defer signer.Close()
+	return authenticateSkillStoreConfigured(ctx, client, bag.AuthEndpoint, guid, appleID, password, agent, headers, signer, codeProvider)
+}
+
 func authenticateSkillStoreClient(ctx context.Context, client *http.Client, guid, appleID, password string, codeProvider func() (string, error)) (*StoreCommerceSession, error) {
-	endpoint := "https://auth.itunes.apple.com/auth/v1/native/fast/"
+	return authenticateSkillStoreConfigured(ctx, client, "https://auth.itunes.apple.com/auth/v1/native/fast/", guid, appleID, password, skillAuthenticationAgent(), nil, nil, codeProvider)
+}
+
+func authenticateSkillStoreConfigured(ctx context.Context, client *http.Client, endpoint, guid, appleID, password, agent string, headers map[string]string, signer sap.ActionSigner, codeProvider func() (string, error)) (*StoreCommerceSession, error) {
 	needsCode := false
 	for attempt, redirects := 1, 0; attempt <= 20; attempt++ {
 		code := ""
@@ -107,8 +153,25 @@ func authenticateSkillStoreClient(ctx context.Context, client *http.Client, guid
 			return nil, &StorageError{Stage: "purchase-store-request"}
 		}
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if signer != nil {
+			signature, err := signer.Sign(body)
+			if err != nil {
+				client.CloseIdleConnections()
+				return nil, &StorageError{Stage: "purchase-store-sap"}
+			}
+			for key, value := range headers {
+				req.Header.Set(key, value)
+			}
+			req.Header.Set("X-Apple-ActionSignature", base64.StdEncoding.EncodeToString(signature))
+		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("User-Agent", skillStoreAgent)
+		req.Header.Set("User-Agent", agent)
+		if signer != nil {
+			req.Header.Set("Accept", "*/*")
+			if agent == storeMacUserAgent {
+				req.Header.Set("Content-Type", "application/x-apple-plist")
+			}
+		}
 		resp, err := client.Do(req)
 		code = ""
 		if err != nil {

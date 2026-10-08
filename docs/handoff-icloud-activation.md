@@ -34,6 +34,16 @@
 - 下单前查询已有 iCloud 订阅以避免重复购买；下单后通过 `speedysub` list/detail 的 specialSubInfo、付费价格核验真实 50 GB。支持新私有商店 checkpoint 保存与账户/物理 GUID 绑定恢复；不保存密码或验证码。
 - 本次做了有上限的直连认证对照，含 Go 传输、Python requests 传输和完整成功请求设置。Apple 仍仅返回 204、无有效跳转的 301/302、HTML 403/404/500/503，没有商店令牌。当前没有进入原生下单或确认请求，QQ 的实时 MME 配额仍为 5 GiB、付费容量 0。以上不能证明账号不支持购买，也不能报告订阅完成。
 
+### 激活 skill 完成后的购买诊断
+
+- 激活 skill 新增 `references/windows-runbook.md`，覆盖 Windows 私有目录权限、账号独立 APS/ADI、NAC、同一活跃验证码 challenge、GSA checkpoint 立即续用、按批准版本确认条款、v2 delegate 与配额验收。已同步到全局 skill 并通过 validator，提交 `50ce838`。
+- 购买认证新增可显式选择的 compact Configurator 标识，以及使用物理 Store GUID 的 SAP 签名对照。`-claude-skill -native-store -signed-store` 使用 Configurator；`-appstore-profile` 使用 Apple bag 的原生 App Store 端点及本账号头。均保留同一 cookie jar，仅在 Apple 明确要求 2FA 后生成和附加验证码，不替换账号 Mac 身份。
+- compact Configurator 与签名 Configurator 都未取得商店令牌，仍返回空白/HTML 的 204、301/302、403/404、500/503。各诊断执行有明确上限。
+- 物理 GUID 的签名 App Store 对照使用表单 Content-Type 与受限 Accept 时返回空体 406；放宽 Accept 后返回空体 400。响应带 Apple 应用服务头，区别于之前的通用 HTML，但仍不是有效登录结果。补齐当前 bag 的 fast 路径末尾斜杠后仍为 400；改用 plist Content-Type 后再次只有通用路由响应。不能把这些结果解释成验证码无效、账号不能购买、唯一根因或恢复时间。
+- 所有新增尝试均在 Store 认证阶段停止，没有发送本次原生 buyProduct 或确认请求。此前 Windows 页面链路曾发出表单请求，不能将历史概括为从未发送任何购买相关 POST。保持原 accepted MME，核验实时配额后再决定后续动作。
+- 本轮最后重新构建 `accountsetupcheck` 后，用原 accepted checkpoint 单独进行 GET 配额复核，Apple 返回总容量 5368709120 字节、已用 0、付费容量 0；没有新登录或账户写入。旧 `bin/accountsetupcheck.exe` 不包含新参数，必须按 skill 先构建，不能把旧二进制的 flag 错误解释为 Apple 拒绝。
+- 回归测试覆盖签名与实际请求体一致、challenge 后重新签名、物理 GUID 绑定保留，以及 400/406/429 不循环重试。协议测试不替代 Apple 购买验收。
+
 ### 当前目标 01-account 的最新直连复测
 
 - Windows CoreADI 使用该目录下独立且稳定的 Windows 身份，GSA 使用新会话。用户提供的两个密码变体已分别测试；其中一个通过服务器 SRP proof 并进入 2FA，另一个在 `complete / s2k` 返回 `ec=-22406`。文档不保存密码。
