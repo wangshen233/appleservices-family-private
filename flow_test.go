@@ -238,6 +238,7 @@ func TestFailedVerificationRemainsPending(t *testing.T) {
 }
 
 func TestICloudRejectionDoesNotSaveSession(t *testing.T) {
+	t.Setenv("APPLESERVICES_ALLOW_DEGRADED_ICLOUD", "1")
 	s := &memoryStore{}
 	b := &fakeBackend{results: []*gsa.LoginResult{testResult(false)}}
 	fetch := func(map[string]string, string, string, string) (icloud.DelegateTokens, error) {

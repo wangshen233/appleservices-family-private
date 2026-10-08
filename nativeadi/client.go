@@ -214,7 +214,8 @@ func (c *Client) Start(ctx context.Context) error {
 		close(c.done)
 	}()
 	init := map[string]any{"library": c.config.LibraryPath, "fence": fence, "profile": c.config.ProfileDir,
-		"identifier": c.config.Identifier, "serial": c.config.Serial, "push_token": c.config.PushToken}
+		"identifier": c.config.Identifier, "serial": c.config.Serial, "push_token": c.config.PushToken,
+		"mac_address": SyntheticMACAddress(c.config.Identifier)}
 	if err := json.NewEncoder(input).Encode(init); err != nil {
 		c.Close()
 		return errors.New("nativeadi: bridge initialization failed")
@@ -284,9 +285,9 @@ func (c *Client) Headers() (map[string]string, error) {
 		}
 	}
 	// The ADI module reports the machine identifier it derived, but not the
-	// lookup value that ties it to this device. Every other anisette provider
-	// sends X-Apple-I-MD-LU, and Apple answers a delegate request without it by
-	// refusing the mobileme service.
+	// lookup value that ties it to this device. Match the MDLU derivation used
+	// by our remote anisette provider; this does not establish why a particular
+	// delegate request was refused.
 	if message.Headers["X-Apple-I-MD-LU"] == "" {
 		if os.Getenv("APPLESERVICES_ADI_NO_MDLU") == "" {
 			sum := sha256.Sum256(c.config.Identifier)
@@ -296,9 +297,8 @@ func (c *Client) Headers() (map[string]string, error) {
 	message.Headers["X-Apple-I-SRL-NO"] = c.config.Serial
 	message.Headers["User-Agent"] = "akd/1.0 CFNetwork/1408.0.4 Darwin/22.5.0"
 	// X-Apple-I-MD-RINFO is a routing/provisioning state. Known-good clients
-	// send 17106176 or 50660608, and Apple refuses the mobileme delegate with
-	// "A server problem is blocking Apple ID sign in" when the value is one it
-	// does not accept. The override exists so that claim stays testable.
+	// send different values. An override is diagnostic only; changing this
+	// number does not regenerate the associated provisioning credentials.
 	if override := strings.TrimSpace(os.Getenv("APPLESERVICES_ADI_RINFO")); override != "" {
 		message.Headers["X-Apple-I-MD-RINFO"] = override
 	}

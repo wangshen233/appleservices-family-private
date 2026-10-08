@@ -65,10 +65,12 @@ func run() (runErr error) {
 		*controlAPI = true
 	}
 	if *useNativeADI {
-		*native = true
 		if *codeProvider != "" {
 			return errors.New("native-adi cannot be combined with an external code-provider")
 		}
+		// Mac-style ADI uses the certificate/token saved for this account.
+		// Windows daemon push is a separately requested diagnostic backend;
+		// it must not silently make every Mac profile share one push token.
 	}
 	if *probeNative {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -100,7 +102,7 @@ func run() (runErr error) {
 	}
 	store := fileStore{dir: *dir}
 	device, err := store.LoadDevice()
-	if err != nil || device == nil || len(device.Identifier) != 16 || len(device.ProvisioningBlob) == 0 {
+	if err != nil || device == nil || len(device.Identifier) != 16 || (!*useNativeADI && !(anisette.State{AdiPB: device.ProvisioningBlob}).Provisioned()) {
 		return errors.New("a provisioned device state is required; complete the existing login first")
 	}
 	savedPath := filepath.Join(*dir, "push.json")
@@ -372,6 +374,23 @@ func run() (runErr error) {
 			}
 		}
 	}
+	registration := appleservices.DeviceRegistration{Name: *name, PushToken: push.State().Token}
+	if !*listenOnly {
+		generationCtx, stop := context.WithTimeout(ctx, 15*time.Second)
+		_, err = generateCode(generationCtx)
+		stop()
+		if err != nil {
+			return fmt.Errorf("code-generation prerequisite failed before account registration: %w", err)
+		}
+	}
+	// The reference client sends GSA postdata after 2FA and before requesting
+	// iCloud delegates. For the explicit NAC diagnostic, allow an isolated
+	// delegate retry because accountsetupcheck does not mutate registration.
+	if strings.TrimSpace(os.Getenv("APPLESERVICES_SKIP_DEVICE_REGISTRATION")) != "1" {
+		if err := login.PrepareDeviceRegistration(registration); err != nil {
+			return err
+		}
+	}
 	client, err := login.Client()
 	if ctx.Err() != nil {
 		return nil
@@ -382,18 +401,6 @@ func run() (runErr error) {
 	var active maintainedLogin = login
 	accountID := client.ADSID
 	circles := newCircleManager(accountID, client.DSID)
-	registration := appleservices.DeviceRegistration{Name: *name, PushToken: push.State().Token}
-	if !*listenOnly {
-		generationCtx, stop := context.WithTimeout(ctx, 15*time.Second)
-		_, err = generateCode(generationCtx)
-		stop()
-		if err != nil {
-			return fmt.Errorf("code-generation prerequisite failed before account registration: %w", err)
-		}
-	}
-	if err := active.RegisterDevice(registration); err != nil {
-		return err
-	}
 	if ctx.Err() != nil {
 		return nil
 	}

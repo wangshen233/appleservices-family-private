@@ -183,10 +183,8 @@ func (s *Server) addAccount(ctx context.Context, creds credentials) (control.Res
 		s.accountsMu.Unlock()
 		return control.Result{Message: err.Error()}, ""
 	}
-	// Each account gets its own freshly generated identity. Copying another
-	// account's identity is what Apple rejects with ec=-29004 "possible
-	// environment mismatch", and the rejection permanently invalidates that
-	// identity for every account that presented it.
+	// Each account gets isolated identity and provisioning state. An
+	// environment-mismatch response alone does not prove permanent damage.
 	if err := provisionIdentity(dir); err != nil {
 		os.RemoveAll(dir)
 		s.accountsMu.Unlock()

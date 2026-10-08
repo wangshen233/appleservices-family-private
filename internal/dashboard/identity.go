@@ -12,10 +12,9 @@ import (
 
 // provisionIdentity creates a device identity for a new account.
 //
-// Every account needs its own identity. Presenting one identity from two
-// accounts is what Apple rejects with ec=-29004 "possible environment
-// mismatch", and the rejection invalidates that identity for every account that
-// used it, so an identity is always freshly generated and never copied.
+// Accounts use separate identities so one account's provisioning state cannot
+// overwrite another's. An environment-mismatch error alone does not establish
+// that sharing an identity permanently invalidates it.
 //
 // The identity is a random 16-byte identifier. The local ADI module provisions
 // it on first use: it registers the identifier and derives the anisette headers
@@ -31,13 +30,8 @@ func provisionIdentity(dir string) error {
 		return errors.New("无法生成设备身份")
 	}
 	device := appleservices.Device{
-		Identifier: state.Identifier,
-		// The native ADI path derives its credentials from the identifier and
-		// never reads this field, but the worker requires it to be non-empty.
-		// It is only consumed by the external code-provider path, which this
-		// panel does not use.
-		ProvisioningBlob: []byte("native-adi"),
-		SerialNumber:     "AS" + upperHex(state.Identifier[:5]),
+		Identifier:   state.Identifier,
+		SerialNumber: "AS" + upperHex(state.Identifier[:5]),
 	}
 	data, err := json.MarshalIndent(device, "", "  ")
 	if err != nil {

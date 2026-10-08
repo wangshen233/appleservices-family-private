@@ -1,6 +1,7 @@
 package anisette
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -64,7 +65,11 @@ func (s State) MDLU() string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s State) Provisioned() bool { return len(s.AdiPB) > 0 }
+// Older dashboard identities used this marker for the native ADI path. It is
+// not an Apple-issued remote provisioning blob.
+func (s State) Provisioned() bool {
+	return len(s.AdiPB) > 0 && !bytes.Equal(s.AdiPB, []byte("native-adi"))
+}
 
 func DefaultStatePath() (string, error) {
 	base, err := os.UserConfigDir()

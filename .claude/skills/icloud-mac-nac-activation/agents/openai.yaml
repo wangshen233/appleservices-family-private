@@ -1,0 +1,4 @@
+interface:
+  display_name: "iCloud Mac NAC Activation"
+  short_description: "Validate iCloud Mac v2/NAC activation from Windows"
+  default_prompt: "Use $icloud-mac-nac-activation to diagnose or validate iCloud Mac v2/NAC activation from Windows."

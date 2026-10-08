@@ -79,7 +79,9 @@ class Provider:
         if self.fence.InstallTransportFence(b.library._handle)!=2: raise RuntimeError('private transport isolation failed')
         hardware_path=self.profile/'hw_info.plist'
         if not hardware_path.exists():
-            inner=b''.join([field(1,'MacBookPro15,1'),field(2,b'\x02\x00\x00\x00\x00\x01'),
+            mac_address=base64.b64decode(request['mac_address'],validate=True)
+            if len(mac_address)!=6 or mac_address[0]&3!=2: raise RuntimeError('invalid synthetic network identity')
+            inner=b''.join([field(1,'MacBookPro15,1'),field(2,mac_address),
                            field(3,request['serial']),field(4,self.device_id),field(5,self.device_id),
                            field(6,'Mac-937A206F2EE63C01'),field(7,'22C65')])
             encoded=b''.join([field(1,inner),field(2,'13.1'),varint(3<<3)+varint(1660),
@@ -90,7 +92,9 @@ class Provider:
         hardware=plistlib.loads(hardware_path.read_bytes())
         if hardware['os_config']['inner']['platform_serial_number']!=request['serial']:
             raise RuntimeError('native serial mismatch')
-        hardware['push']={'token':token}
+        # Keep account-isolated Mac APS credentials when a profile has them.
+        # Updating its bound token must not discard its certificate/private key.
+        hardware.setdefault('push',{})['token']=token
         hardware_path.write_bytes(plistlib.dumps(hardware))
         result=b.sync(166,encode_string(str(self.profile)))
         if not result or result[0]!=1: raise RuntimeError('native profile is invalid')

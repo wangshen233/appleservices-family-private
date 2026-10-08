@@ -84,22 +84,24 @@ func BeginLogin(creds Credentials, store Store, opts ...Option) (*Login, error) 
 	}
 	var gsess *gsa.Session
 	// Older, unbound sessions and sessions belonging to another account are ignored.
-	if sess != nil && strings.EqualFold(sess.AppleID, creds.AppleID) {
+	if sess != nil && strings.EqualFold(sess.AppleID, creds.AppleID) && strings.TrimSpace(os.Getenv("APPLESERVICES_FRESH_GSA")) != "1" {
 		s := toGSASession(*sess)
 		gsess = &s
 	}
 	if o.serialNumber != "" {
 		l.serialNumber = o.serialNumber
 	}
-	if l.serialNumber != "" {
+	// Mac v2/NAC validation is bound to the native provider's own serial and
+	// hardware profile. Do not overwrite its SRL header with the Windows
+	// account-registration serial during this explicit diagnostic path.
+	if l.serialNumber != "" && strings.TrimSpace(os.Getenv("APPLESERVICES_NAC_VALIDATION_FILE")) == "" {
 		l.anisette = identityAnisette{provider: l.anisette, serial: l.serialNumber}
 	}
 	l.backend = o.newBackend(l.anisette, gsess)
 	if l.serialNumber != "" {
-		// The iCloud delegate exchange succeeds with the plain akd client
-		// identity and is refused with ICLOUD_INVALID_DEVICE_TOKEN when the
-		// session presents itself as AppleIDSettings, so this stays behind an
-		// escape hatch while the two paths are compared.
+		// Keep the worker's AppleIDSettings client identity selectable for
+		// controlled comparisons. A delegate refusal alone does not identify
+		// which GSA client header caused it.
 		if os.Getenv("APPLESERVICES_NO_NATIVE_DEVICE_AUTH") == "" {
 			if backend, ok := l.backend.(interface{ EnableNativeDeviceAuthentication() }); ok {
 				backend.EnableNativeDeviceAuthentication()
@@ -289,24 +291,9 @@ func (l *Login) Client() (*Client, error) {
 	}
 	dt, err := l.fetchDelegate(headers, l.creds.AppleID, l.adsid, pet)
 	if err != nil {
-		// Apple refuses the iCloud delegate for some accounts, for example
-		// while a fresh sign-in is still being reviewed ("A server problem is
-		// blocking Apple ID sign in"). Device registration and the account
-		// device list run on the GSA session, so an operator may opt in (for
-		// the trusted-device tool only) to continue with a client that has no
-		// iCloud service data. Default behaviour still refuses to report
-		// success without iCloud acceptance.
-		if os.Getenv("APPLESERVICES_ALLOW_DEGRADED_ICLOUD") == "1" {
-			gsess, snapErr := l.backend.Snapshot(l.adsid, spdTokens(l.result.SessionPayload))
-			if snapErr == nil {
-				sess := fromGSASession(gsess)
-				sess.AppleID = l.creds.AppleID
-				if saveErr := l.store.SaveSession(&sess); saveErr == nil {
-					l.client = &Client{ADSID: l.adsid, serviceData: map[string]any{}}
-					return l.client, nil
-				}
-			}
-		}
+		// Account-side registration can succeed without iCloud service data.
+		// Never turn that partial result into an authenticated iCloud client,
+		// including when an older launcher enables the retired degraded flag.
 		return nil, fmt.Errorf("appleservices: iCloud login: %w", err)
 	}
 	if dt.DSID == "" || dt.MMEAuthToken == "" {

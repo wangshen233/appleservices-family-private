@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	_ "embed"
 	"net"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ func AppleRootTransport() http.RoundTripper {
 		pool = x509.NewCertPool()
 	}
 	pool.AppendCertsFromPEM([]byte(AppleRootCAPEM))
+	pool.AppendCertsFromPEM([]byte(AppleRootCAG3PEM))
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = http.ProxyFromEnvironment
 	if transport.TLSClientConfig == nil {
@@ -29,6 +31,13 @@ func AppleRootTransport() http.RoundTripper {
 	applySOCKS5Proxy(transport)
 	return transport
 }
+
+// Apple PKI: https://www.apple.com/certificateauthority/AppleRootCA-G3.cer
+// DER SHA-256: 63343abfb89a6a03ebb57e9b3f5fa7be7c4f5c756f3017b3a8c488c3653e9179.
+// The NAC certificate endpoint chains to G3 rather than the legacy Apple root.
+//
+//go:embed apple_root_ca_g3.pem
+var AppleRootCAG3PEM string
 
 // applySOCKS5Proxy routes this transport through a SOCKS5 proxy named by
 // APPLESERVICES_SOCKS_PROXY. Apple throttles the verification-code page by

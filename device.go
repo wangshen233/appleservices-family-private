@@ -36,6 +36,15 @@ func (l *Login) RegisterDevice(registration DeviceRegistration) error {
 	if l.client == nil || l.needsTwoFactor {
 		return errors.New("appleservices: complete iCloud authentication before device registration")
 	}
+	return l.PrepareDeviceRegistration(registration)
+}
+
+// PrepareDeviceRegistration sends account-side GSA postdata before the iCloud
+// delegate exchange. Acceptance of postdata is not iCloud activation.
+func (l *Login) PrepareDeviceRegistration(registration DeviceRegistration) error {
+	if l.needsTwoFactor || l.result == nil || l.adsid == "" {
+		return errors.New("appleservices: complete account authentication before device registration")
+	}
 	backend, ok := l.backend.(interface {
 		RegisterDevice(map[string]any, gsa.DeviceRegistration) error
 	})

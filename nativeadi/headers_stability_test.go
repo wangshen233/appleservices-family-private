@@ -8,16 +8,9 @@ import (
 	"time"
 )
 
-// TestAnisetteHeadersSurviveRestart pins down a property the worker depends on:
-// restarting it must not change the device's anisette headers.
-//
-// This matters because a changed identity would make Apple reject the login
-// with ec=-29004 "possible environment mismatch" — the account would appear
-// broken after an ordinary restart. The test disproves that for the local ADI
-// module, so a restart is safe for the device identity.
-//
-// It is skipped unless APPLESERVICES_ADI_DLL and APPLESERVICES_ADI_DEVICE are
-// set, because it starts the real module.
+// TestAnisetteHeadersSurviveRestart checks stable identity fields across helper
+// restarts. It does not establish Apple acceptance of an account login. This
+// integration test is skipped unless its DLL and device variables are set.
 func TestAnisetteHeadersSurviveRestart(t *testing.T) {
 	library := os.Getenv("APPLESERVICES_ADI_DLL")
 	devicePath := os.Getenv("APPLESERVICES_ADI_DEVICE")
@@ -55,14 +48,14 @@ func TestAnisetteHeadersSurviveRestart(t *testing.T) {
 	}
 
 	first, second := headers(), headers()
-	for _, key := range []string{"X-Apple-I-MD", "X-Apple-I-MD-M", "X-Mme-Device-Id", "X-Apple-I-MD-LU"} {
+	// X-Apple-I-MD is an OTP-like value and need not survive a restart.
+	for _, key := range []string{"X-Apple-I-MD-M", "X-Mme-Device-Id", "X-Apple-I-MD-LU"} {
 		if first[key] == "" {
 			t.Errorf("%s is missing", key)
 			continue
 		}
 		if first[key] != second[key] {
-			t.Errorf("%s changed across restart, so a restarted worker would present a different device\n  first:  %q\n  second: %q",
-				key, first[key], second[key])
+			t.Errorf("%s changed across restart; first-length=%d; second-length=%d", key, len(first[key]), len(second[key]))
 		}
 	}
 }

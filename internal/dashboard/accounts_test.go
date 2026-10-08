@@ -95,11 +95,24 @@ func TestAddingAccountDoesNotOverwriteExistingAccount(t *testing.T) {
 	}
 }
 
-// TestNewIdentityIsNeverACopy guards the cause of ec=-29004 "possible
-// environment mismatch": an identity presented by two accounts is rejected and
-// permanently invalidated. A new account must therefore always be given a
-// freshly generated identity, never one copied from another account.
+// TestNewIdentityIsNeverACopy verifies per-account state isolation and prevents
+// fake provisioning markers from being introduced in a newly created identity.
 func TestNewIdentityIsNeverACopy(t *testing.T) {
+	freshDir := t.TempDir()
+	if err := provisionIdentity(freshDir); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(freshDir, "device.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var device appleservices.Device
+	if err := json.Unmarshal(data, &device); err != nil {
+		t.Fatal(err)
+	}
+	if len(device.Identifier) != 16 || len(device.ProvisioningBlob) != 0 {
+		t.Fatal("new identity contains fake provisioning credentials")
+	}
 	dir := t.TempDir()
 	// A directory that already has an identity must not be re-provisioned.
 	if err := os.WriteFile(filepath.Join(dir, "device.json"), []byte(`{"Identifier":"c29tZS1pZGVudGl0eQ=="}`), 0o600); err != nil {

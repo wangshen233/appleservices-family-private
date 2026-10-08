@@ -71,6 +71,15 @@ func TestGrandSlamNormalizesWireHeaderAndCPD(t *testing.T) {
 	}
 }
 
+func TestBrowserTwoFactorProfilePreservesAnisetteIdentity(t *testing.T) {
+	t.Setenv("APPLESERVICES_2FA_PROFILE", "browser")
+	c := NewClient(headerProvider{"X-Mme-Device-Id": "test-device", "X-Apple-I-MD": "test-md", "User-Agent": "akd-test"})
+	h, err := c.twoFactorHeaders("test-adsid", "test-idms")
+	if err != nil || h["X-Mme-Device-Id"] != "test-device" || h["X-Apple-I-MD"] != "test-md" || !strings.HasPrefix(h["User-Agent"], "Mozilla/5.0") {
+		t.Fatal("2FA browser comparison changed the authentication identity", err)
+	}
+}
+
 func TestGrandSlamStopsOnUnknownProtocol(t *testing.T) {
 	c := NewClient(headerProvider{})
 	requests := 0
@@ -193,5 +202,82 @@ func TestSMSSubmitUsesTheRequestedPhone(t *testing.T) {
 	}
 	if discoveries != 1 {
 		t.Fatal("SMS submission rediscovered a potentially different phone")
+	}
+}
+
+func TestExplicitSMSPhoneStaysBoundWithoutMetadata(t *testing.T) {
+	c := NewClient(headerProvider{})
+	requests := 0
+	c.transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		if r.Method == "GET" {
+			t.Fatal("explicit phone selection unexpectedly fetched metadata")
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(body, []byte(`"id":7`)) {
+			t.Fatal("request and verification did not use the selected phone")
+		}
+		return &http.Response{StatusCode: 204, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})
+	if err := c.RequestSMSCodeForPhone("test-adsid", "test-idms", 0); err == nil || requests != 0 {
+		t.Fatal("invalid phone selection sent a request")
+	}
+	if err := c.RequestSMSCodeForPhone("test-adsid", "test-idms", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SubmitSMSCode("test-adsid", "test-idms", "123456"); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatal("unexpected request count")
+	}
+}
+
+func TestSMSLimitStopsBeforeSendingAndRedactsResponse(t *testing.T) {
+	c := NewClient(headerProvider{})
+	requests := 0
+	c.transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		if r.Method != "GET" || r.URL.Path != "/auth" {
+			t.Fatal("sent SMS after Apple rejected number discovery")
+		}
+		body := `{"securityCode":{"tooManyCodesSent":true},"noTrustedDevices":true,"serviceErrors":[{"code":"-22981","message":"owner@example.test 123456 private-token"}]}`
+		return &http.Response{StatusCode: 423, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	err := c.RequestSMSCode("test-adsid", "test-idms")
+	var responseErr *SecondFactorError
+	if !errors.As(err, &responseErr) || responseErr.HTTPStatus != 423 || responseErr.Code != -22981 || !responseErr.TooManyCodesSent || !responseErr.NoTrustedDevices {
+		t.Fatal("lost Apple's explicit SMS limit state")
+	}
+	if requests != 1 {
+		t.Fatal("retried a rejected second-factor request")
+	}
+	for _, private := range []string{"owner@example.test", "123456", "private-token"} {
+		if strings.Contains(err.Error(), private) {
+			t.Fatal("exposed private response fields")
+		}
+	}
+}
+
+func TestAuthKitSecondFactorContextPreservesMacIdentity(t *testing.T) {
+	t.Setenv("APPLESERVICES_2FA_PROFILE", "authkit")
+	info := "<test-Mac> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
+	c := NewClient(headerProvider{"X-Mme-Client-Info": info, "X-Mme-Device-Id": "test-device", "X-Apple-I-MD": "test-md", "X-Apple-I-MD-M": "test-mid"})
+	if _, err := c.twoFactorHeaders("test-adsid", "test-idms"); err == nil {
+		t.Fatal("silently applied a Mac context to a non-native client")
+	}
+	c.EnableNativeDeviceAuthentication()
+	h, err := c.twoFactorHeaders("test-adsid", "test-idms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(h["X-Mme-Client-Info"], "<test-Mac> <macOS;13.1;22C65>") || h["X-Mme-Device-Id"] != "test-device" || h["X-Apple-I-MD"] != "test-md" || h["X-Apple-I-MD-M"] != "test-mid" {
+		t.Fatal("AuthKit comparison changed the provisioned identity")
+	}
+	if h["X-Apple-AK-Context-Type"] != "icloud" || h["X-Apple-I-Client-Bundle-Id"] != "com.apple.systempreferences.AppleIDSettings" {
+		t.Fatal("missing native second-factor context")
 	}
 }
