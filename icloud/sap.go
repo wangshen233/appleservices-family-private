@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -398,6 +399,39 @@ func AuthenticateStore(ctx context.Context, appleID, password, code string, head
 	return &StoreCommerceSession{client: client, identity: identity}, nil
 }
 
+// AuthenticateStoreForHardware preserves an explicitly selected account Mac's
+// network identity. It never selects a shared physical Windows interface or
+// retries a rejected authentication request automatically.
+func AuthenticateStoreForHardware(ctx context.Context, appleID, password, code string, headers map[string]string, hardware []byte) (*StoreCommerceSession, error) {
+	return AuthenticateStoreForHardwareWithRetries(ctx, appleID, password, code, headers, hardware, 0)
+}
+
+// AuthenticateStoreForHardwareWithRetries permits a caller-selected, bounded
+// retry of HTTP routing failures during authentication only. It never purchases
+// or retries an application rejection or an HTTP 429.
+func AuthenticateStoreForHardwareWithRetries(ctx context.Context, appleID, password, code string, headers map[string]string, hardware []byte, retries int) (*StoreCommerceSession, error) {
+	if retries < 0 || retries > 3 {
+		return nil, &StorageError{Stage: "purchase-store-retry-limit"}
+	}
+	if len(hardware) != 6 || hardware[0]&1 != 0 || bytes.Equal(hardware, make([]byte, 6)) {
+		return nil, &StorageError{Stage: "purchase-store-hardware"}
+	}
+	guid := strings.ToUpper(fmt.Sprintf("%x", hardware))
+	client := &http.Client{Jar: mustCookieJar(), Transport: storeProxyTransport(), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	bag, err := loadStoreSAPBag(ctx, client, guid)
+	if err != nil {
+		client.CloseIdleConnections()
+		return nil, &StorageError{Stage: "purchase-store-bag"}
+	}
+	// The current native endpoint does not use a SAP action signature.
+	identity, err := authenticateSignedStoreBounded(ctx, client, bag.AuthEndpoint, appleID, password, code, guid, headers, nil, retries)
+	if err != nil {
+		client.CloseIdleConnections()
+		return nil, err
+	}
+	return &StoreCommerceSession{client: client, identity: identity}, nil
+}
+
 // CheckStoreAuthentication establishes a Store session without reading an
 // offer or contacting buyProduct/volumeAuthenticate.
 func CheckStoreAuthentication(ctx context.Context, appleID, password, code string, headers map[string]string) (*StoreAuthenticationInfo, error) {
@@ -500,6 +534,10 @@ func storeAuthRetryAfter(header http.Header, now time.Time) time.Duration {
 }
 
 func authenticateSignedStore(ctx context.Context, client *http.Client, endpoint, appleID, password, code, guid string, headers map[string]string, signer sap.ActionSigner) (*storeSession, error) {
+	return authenticateSignedStoreBounded(ctx, client, endpoint, appleID, password, code, guid, headers, signer, storeAuthAttempts)
+}
+
+func authenticateSignedStoreBounded(ctx context.Context, client *http.Client, endpoint, appleID, password, code, guid string, headers map[string]string, signer sap.ActionSigner, retryLimit int) (*storeSession, error) {
 	if code != "" && (len(code) != 6 || strings.IndexFunc(code, func(r rune) bool { return r < '0' || r > '9' }) != -1) {
 		return nil, &StorageError{Stage: "purchase-store-code"}
 	}
@@ -515,6 +553,9 @@ func authenticateSignedStore(ctx context.Context, client *http.Client, endpoint,
 		}
 		signatureHeader := ""
 		if !modernAuth {
+			if signer == nil {
+				return nil, &StorageError{Stage: "purchase-store-sap"}
+			}
 			signature, err := signer.Sign(body)
 			if err != nil {
 				return nil, &StorageError{Stage: "purchase-store-sap"}
@@ -553,7 +594,29 @@ func authenticateSignedStore(ctx context.Context, client *http.Client, endpoint,
 		if readErr != nil || len(responseBody) > maxStoreBagBytes {
 			return nil, &StorageError{Stage: "purchase-store-response", HTTPStatus: status}
 		}
+		if directory := os.Getenv("APPLESERVICES_STORE_AUTH_DIAGNOSTIC_DIR"); directory != "" {
+			file, err := os.CreateTemp(directory, "store-auth-response-*.json")
+			if err != nil {
+				return nil, &StorageError{Stage: "purchase-store-private-diagnostic"}
+			}
+			writeErr := json.NewEncoder(file).Encode(map[string]any{"HTTP": status, "headers": resp.Header, "body": responseBody})
+			closeErr := file.Close()
+			if writeErr != nil || closeErr != nil {
+				return nil, &StorageError{Stage: "purchase-store-private-diagnostic"}
+			}
+		}
 		if status >= 300 && status < 400 {
+			// A bare redirect has no navigation to follow. In the explicitly
+			// bounded account-Mac mode, retry authentication routing only.
+			if strings.TrimSpace(location) == "" && retryLimit <= 3 && routeRetries < retryLimit {
+				routeRetries++
+				select {
+				case <-ctx.Done():
+					return nil, &StorageError{Stage: "purchase-store-authentication", HTTPStatus: status}
+				case <-time.After(storeAuthRetryDelay << min(routeRetries-1, 2)):
+				}
+				continue
+			}
 			if redirects >= maxSAPRedirects || (status != 301 && status != 302 && status != 307 && status != 308) {
 				return nil, &StorageError{Stage: "purchase-store-authentication", HTTPStatus: status, Hint: "from=" + safeEndpointLabel(req.URL) + ";to=" + safeRedirectLabel(location)}
 			}
@@ -564,11 +627,11 @@ func authenticateSignedStore(ctx context.Context, client *http.Client, endpoint,
 			redirects++
 			continue
 		}
-		if status < 200 || status >= 300 {
+		if status == http.StatusNoContent || status < 200 || status >= 300 {
 			// A retryable status means the request never reached the
 			// application, so it is resent unchanged rather than reported as a
 			// credential failure.
-			if retryableStoreAuthStatus(status) && routeRetries < storeAuthAttempts {
+			if status != http.StatusTooManyRequests && retryableStoreAuthStatus(status) && routeRetries < retryLimit {
 				routeRetries++
 				delay := storeAuthRetryDelay << min(routeRetries-1, 3)
 				if delay > storeAuthRetryCap {
@@ -594,9 +657,12 @@ func authenticateSignedStore(ctx context.Context, client *http.Client, endpoint,
 			}
 		}
 		var failure *StorageError
-		if errors.As(loginErr, &failure) && failure.AppleCode == "-5000" && attempt == 1 {
+		if errors.As(loginErr, &failure) && failure.AppleCode == "-5000" && attempt == 1 && retryLimit == storeAuthAttempts {
 			attempt++
 			continue
+		}
+		if errors.As(loginErr, &failure) && failure.Stage == "purchase-store-2fa" && code != "" {
+			failure.Stage = "purchase-store-code-unverified"
 		}
 		if session != nil {
 			session.GUID = guid

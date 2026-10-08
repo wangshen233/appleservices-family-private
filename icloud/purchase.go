@@ -33,6 +33,8 @@ type PurchaseResult struct {
 	ExternalClientRequired bool   `json:"external_client_required"`
 	HandoffPath            string `json:"handoff_path,omitempty"`
 	QuotaVerified          bool   `json:"quota_verified"`
+	confirmation           url.Values
+	confirmationOriginal   url.Values
 }
 
 const (
@@ -125,6 +127,45 @@ func (s *StoreCommerceSession) SubmitStoragePurchase(ctx context.Context, info *
 	return submitStoragePurchase(ctx, info, appleID, password, dsid, adsid, token, storageBuyToken, headers, target, s)
 }
 
+// SubmitConfirmedStoragePurchase consumes only Apple's exact CN 50GB monthly
+// auto-renew confirmation after the owner has explicitly authorized purchase.
+// Unknown dialogs and ambiguous results are not resubmitted.
+func (s *StoreCommerceSession) SubmitConfirmedStoragePurchase(ctx context.Context, info *StoragePlanInfo, appleID, password, dsid, adsid, token, storageBuyToken string, headers map[string]string, target PurchaseTarget) (*PurchaseResult, error) {
+	if !s.MatchesAccount(dsid) {
+		return nil, &StorageError{Stage: "purchase-store-account-binding"}
+	}
+	result, err := s.SubmitStoragePurchase(ctx, info, appleID, password, dsid, adsid, token, storageBuyToken, headers, target)
+	if err != nil || result == nil || result.confirmation == nil {
+		return result, err
+	}
+	if err := validateNativeStorageConfirmation(result.confirmation, result.confirmationOriginal, s.identity); err != nil {
+		return nil, err
+	}
+	return submitStoreBuyProduct(ctx, s.client, storeBuyProductURL+"?"+result.confirmation.Encode(), headers, adsid, s.identity)
+}
+
+func validateNativeStorageConfirmation(q, original url.Values, session *storeSession) error {
+	for key, values := range q {
+		if len(values) != 1 || key == "" {
+			return &StorageError{Stage: "purchase-confirmation-binding"}
+		}
+	}
+	for key, expected := range map[string]string{"cc": "CN", "offerName": "com.apple.icloud50GB_monthly", "storagePlanInBytes": "53687091200", "price": "6000", "hasConfirmAutoRenew": "true"} {
+		if q.Get(key) != expected {
+			return &StorageError{Stage: "purchase-confirmation-offer"}
+		}
+	}
+	if session == nil || q.Get("salableAdamId") == "" || q.Get("salableAdamId") != original.Get("salableAdamId") {
+		return &StorageError{Stage: "purchase-confirmation-binding"}
+	}
+	for key, expected := range map[string]string{"guid": session.GUID, "prsId": session.DSID, "dsid": session.DSID, "xToken": session.PasswordToken} {
+		if q.Get(key) != "" && q.Get(key) != expected {
+			return &StorageError{Stage: "purchase-confirmation-binding"}
+		}
+	}
+	return nil
+}
+
 // SubmitStoragePurchaseAnonymous runs the verified offer chain on a fresh
 // cookie jar with no native Store login, mirroring the storage WebView: the
 // entry navigation carries the AOSKit identity set, the page-driven form
@@ -205,9 +246,9 @@ func submitStoragePurchase(ctx context.Context, info *StoragePlanInfo, appleID, 
 		if buyErr != nil {
 			return nil, buyErr
 		}
-		if result != nil && result.State != "handoff" {
-			return result, nil
-		}
+		// An ambiguous native response may already represent an order. Never
+		// start another purchase route automatically after that response.
+		return result, nil
 	}
 	return submitStoreForm(ctx, client, offerURL, request.URL.String(), &password, appleID, token, target, headers, adsid, dsid, storageBuyToken, session)
 }
@@ -220,6 +261,15 @@ func submitStoreBuyProduct(ctx context.Context, client *http.Client, offerURL st
 	offer, err := url.Parse(offerURL)
 	if err != nil || offer.RawQuery == "" {
 		return nil, &StorageError{Stage: "purchase-buy"}
+	}
+	q := offer.Query()
+	for _, values := range q {
+		if len(values) != 1 {
+			return nil, &StorageError{Stage: "purchase-buy-offer"}
+		}
+	}
+	if q.Get("offerName") != "com.apple.icloud50GB_monthly" || q.Get("storagePlanInBytes") != "53687091200" || q.Get("cc") != "CN" || q.Get("price") != "6000" {
+		return nil, &StorageError{Stage: "purchase-buy-offer"}
 	}
 	// The App Store purchase client posts the buy parameters as a plist to
 	// the storefront's pod with the hardware GUID in the query. Key spellings
@@ -251,10 +301,18 @@ func submitStoreBuyProduct(ctx context.Context, client *http.Client, offerURL st
 		"pricingParameters":         offerValue("pricingParameters", "STDQ"),
 		"productType":               offerValue("productType", "A"),
 		"salableAdamId":             salable,
+		"offerName":                 q.Get("offerName"),
+		"storagePlanInBytes":        q.Get("storagePlanInBytes"),
+		"cc":                        q.Get("cc"),
+	}
+	for _, key := range []string{"hasConfirmAutoRenew", "nextChargeDate"} {
+		if q.Get(key) != "" {
+			buy[key] = q.Get(key)
+		}
 	}
 	var payload bytes.Buffer
 	encoder := plist.NewEncoderForFormat(&payload, plist.XMLFormat)
-	if err := encoder.Encode(map[string]any{"Header": map[string]any{"Version": "1.0.1"}, "Request": buy}); err != nil {
+	if err := encoder.Encode(buy); err != nil {
 		return nil, &StorageError{Stage: "purchase-buy"}
 	}
 	host := "buy.itunes.apple.com"
@@ -297,12 +355,22 @@ func submitStoreBuyProduct(ctx context.Context, client *http.Client, offerURL st
 	if failure != "" {
 		return nil, &StorageError{Stage: "purchase-buy", HTTPStatus: resp.StatusCode, AppleCode: failure, Hint: shape}
 	}
-	if _, ok := plistResp["dialog"]; ok {
+	if dialog, ok := plistResp["dialog"].(map[string]any); ok {
 		result.State = "confirmation-required"
 		result.ExternalClientRequired = true
+		id, _ := dialog["dialogId"].(string)
+		action, _ := dialog["okButtonAction"].(map[string]any)
+		kind, _ := action["kind"].(string)
+		params, _ := action["buyParams"].(string)
+		if id == "SRVOrderManager.ConfirmBuyingAutoRenewingSubscription" && kind == "Buy" && len(params) <= 65536 {
+			if values, err := url.ParseQuery(params); err == nil && len(values) > 0 {
+				result.confirmation, result.confirmationOriginal = values, q
+			}
+		}
 		return result, nil
 	}
-	if action, _ := plistResp["jingleAction"].(string); strings.Contains(strings.ToLower(action), "purchase") {
+	status, statusPresent := plistResp["status"].(uint64)
+	if docType, _ := plistResp["jingleDocType"].(string); docType == "purchaseSuccess" && statusPresent && status == 0 {
 		result.State = "completed"
 		return result, nil
 	}

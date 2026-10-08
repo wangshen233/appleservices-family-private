@@ -13,6 +13,25 @@ import (
 	"howett.net/plist"
 )
 
+func TestBoundedStoreAuthenticationDoesNotReplayCodeRejectionOrRateLimit(t *testing.T) {
+	for _, status := range []int{200, 429} {
+		calls := 0
+		client := &http.Client{Transport: testStoreTransport(func(req *http.Request) (*http.Response, error) {
+			calls++
+			body := `<plist><dict><key>customerMessage</key><string>MZFinance.BadLogin.Configurator_message</string></dict></plist>`
+			return &http.Response{StatusCode: status, Header: http.Header{}, Request: req, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})}
+		_, err := authenticateSignedStoreBounded(context.Background(), client, "https://auth.itunes.apple.com/auth/v1/native/fast/", "owner@example.test", "test-password", "123456", "TEST-GUID", nil, nil, 3)
+		var failure *StorageError
+		if calls != 1 || !errors.As(err, &failure) {
+			t.Fatalf("HTTP %d was retried or lost its error", status)
+		}
+		if status == 200 && failure.Stage != "purchase-store-code-unverified" {
+			t.Fatal("supplied code was misreported as initial code request")
+		}
+	}
+}
+
 func TestPlistLoginBodyDoesNotUseFormEncoding(t *testing.T) {
 	body, err := plistLoginBody("person@example.test", "secret", "001122AABBCC")
 	if err != nil {

@@ -21,6 +21,14 @@ Report each failed or untested item separately. Do not call a run successful bec
 - `-delegate-only -storage-plan` also reads offers after successful delegate and quota. An available plan proves an offer was returned, not that Store authentication, payment or purchase would succeed.
 - A current-device detail with `trustedDevice=true` and matching local serial establishes the device's reported trust. `supportsVerificationCodes` and `pushDevice` are separate flags; test actual code validation and push delivery only when requested, and do not infer those capabilities from trust alone.
 
+## Explicitly authorized CN 50GB purchase
+
+- Use `tools/icloudpurchase` only after the owner has authorized the exact CN 50 GB / CNY 600 minor units / monthly offer. It requires a bound accepted MME checkpoint, a new private journal and `-confirm-cn-50gb`; existing paid capacity stops the purchase. Preserve every attempt result before considering a retry.
+- `-native-store` authenticates with this account's own diagnostic Mac network identity. `-local-store-code` generates the same Mac's code in memory, without requesting SMS. Generation is partial evidence: it must actually complete Store authentication before being called accepted. A rejected user-supplied code is distinguished from the initial request for 2FA. Prepare the executable before requesting a fresh user code.
+- Native `buyProduct` uses a top-level plist and must retain the exact offerName, storagePlanInBytes, cc and price. Only consume Apple's literal `SRVOrderManager.ConfirmBuyingAutoRenewingSubscription` Buy parameters after checking the same price, capacity, product and session bindings. Unknown dialogs and ambiguous purchase results stop; do not fall through into another purchase route.
+- Authentication routing retries are optional, bounded by `-store-auth-retries` (0 to 3), and never retry an application code rejection, HTTP 429 or purchase. Bare 204/301/404/503 responses do not prove a device code is invalid or accepted. Raw diagnostic responses belong only in an explicitly selected owner-only directory.
+- Completion requires an explicit Apple success marker plus a fresh quota read showing the paid 50 GB plan. A confirmation dialog, HTTP 200, authentication success, existing trust or available offer is insufficient.
+
 Useful failure interpretations:
 
 - `ICLOUD_INVALID_DEVICE_TOKEN` / reason 3005: request identity, token, body, or validation data is not accepted; do not claim a unique cause.
