@@ -28,6 +28,12 @@ go build -o bin/icloudpurchase.exe ./tools/icloudpurchase
 
 可用 `-store-check-only` 只验证商店认证，或用 `-store-session-in` 复用本账号和物理 GUID 绑定的有效商店 checkpoint。该模式最多执行 20 次认证路由尝试；应用错误及 429 停止，购买或不明确认响应不自动重放。
 
+### 验证码时序与当前 bag 路径
+
+验证码只能提交到已经收到 Apple 2FA 应用响应的同一个 cookie 会话。不要在挑战出现前反复重启登录，也不要把多个验证码写死在命令行：提前到达的验证码可能在真正提交前失效。优先使用 `-store-code-file`，由程序在挑战阶段持续读取该文件；文件应只包含最新六位数字、限制为当前用户可读，并在提交后立即删除。程序必须输出“已进入挑战”和“已提交验证码”的阶段信息，避免把等待状态误报成密码错误。
+
+SAP 登录必须使用同一份 Store bag 返回的三元组：`authenticateAccount`、`sign-sap-setup` 和 `sign-sap-setup-cert`。不要无条件把 bag 的 legacy MZFinance 地址改写成 native/fast；需要诊断时使用 `-signed-store -matched-bag`，让认证地址和签名配置保持匹配。该模式仍使用物理 Store GUID，不能替换账号的 iCloud Mac/ADI 身份。
+
 `APPLESERVICES_SKILL_STORE_PROFILE=compact`、附加 `-signed-store` 或 `-appstore-profile` 是显式诊断选项，不是已验证的购买修复。当前目标曾在签名 App Store 对照收到空体 406/400，其他对照仍为通用空白/HTML 响应，均未取得商店令牌。不要把通用 HTTP 错误归因成密码或验证码错误，也不要重复同一失败实验而没有新证据。
 
 ## 关键前提
@@ -196,6 +202,8 @@ okButtonAction.buyParams cc=CN&salableAdamId=6449562876&…&hasConfirmAutoRenew=
 
 **确认下单 = 用苹果给的 `buyParams` 原样重发**（不要自己拼参数），并带上
 `hasConfirmAutoRenew=true` 与 `hasShownExtraConfirmationNeededForBuyRecurringItem=true`。
+
+部分 Store pod 会省略 `dialogId`，但仍返回 `okButtonAction.kind=Buy` 和有效的 `buyParams`。此时以 Buy action 和参数校验为准，继续原样提交确认；不能因为 `dialogId` 为空就返回 `confirmation-required`。
 
 成功响应：
 
