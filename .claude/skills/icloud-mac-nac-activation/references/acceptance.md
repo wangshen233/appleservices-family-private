@@ -23,6 +23,8 @@ Report each failed or untested item separately. Do not call a run successful bec
 
 ## Explicitly authorized CN 50GB purchase
 
+The repository's `.claude/skills/icloud-plus-purchase/SKILL.md` is the purchase procedure. Use `icloudpurchase -claude-skill -native-store` to select its physical Store GUID, native plist confirmation and `speedysub` detail verification. Plain `-native-store` retains the earlier diagnostic account-Mac Store mode; it is not a substitute for that purchase skill. Keep the account's Mac/ADI/APS activation identity unchanged when selecting a physical Store GUID.
+
 - Use `tools/icloudpurchase` only after the owner has authorized the exact CN 50 GB / CNY 600 minor units / monthly offer. It requires a bound accepted MME checkpoint, a new private journal and `-confirm-cn-50gb`; existing paid capacity stops the purchase. Preserve every attempt result before considering a retry.
 - `-native-store` authenticates with this account's own diagnostic Mac network identity. `-local-store-code` generates the same Mac's code in memory, without requesting SMS. Generation is partial evidence: it must actually complete Store authentication before being called accepted. A rejected user-supplied code is distinguished from the initial request for 2FA. Prepare the executable before requesting a fresh user code.
 - Native `buyProduct` uses a top-level plist and must retain the exact offerName, storagePlanInBytes, cc and price. Only consume Apple's literal `SRVOrderManager.ConfirmBuyingAutoRenewingSubscription` Buy parameters after checking the same price, capacity, product and session bindings. Unknown dialogs and ambiguous purchase results stop; do not fall through into another purchase route.

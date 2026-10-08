@@ -9,6 +9,8 @@ metadata:
 
 Use this skill for protocol-level iCloud activation work from Windows. The target result is an Apple-accepted `mmeAuthToken` followed by a successful read-only quota request.
 
+For purchases and paid-subscription checks in this repository, read `.claude/skills/icloud-plus-purchase/SKILL.md`. Its Store authentication, physical Store GUID and native purchase flow are distinct from the account's diagnostic Mac activation identity. Activation success alone does not complete a purchase.
+
 ## Boundaries
 
 - Work through installed binaries, local APIs, source, and protocol clients. Do not launch or control the official iCloud GUI.

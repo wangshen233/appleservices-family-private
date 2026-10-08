@@ -1,0 +1,534 @@
+package icloud
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/cookiejar"
+	"net/url"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/Laky-64/appleservices/internal/backgroundexec"
+	"howett.net/plist"
+)
+
+const skillStoreAgent = "Configurator/2.18 (Macintosh; OS X 15.4.1; 24E263) AppleWebKit/0621.1.15.11.10"
+
+type skillPythonTransport struct{}
+
+func (skillPythonTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body []byte
+	if req.Body != nil {
+		var err error
+		body, err = io.ReadAll(req.Body)
+		req.Body.Close()
+		if err != nil {
+			return nil, errors.New("cannot read private request")
+		}
+	}
+	headers := map[string]string{}
+	for k, v := range req.Header {
+		headers[k] = strings.Join(v, ", ")
+	}
+	input, err := json.Marshal(map[string]any{"method": req.Method, "url": req.URL.String(), "headers": headers, "body": body})
+	if err != nil {
+		return nil, errors.New("cannot encode private request")
+	}
+	command := exec.CommandContext(req.Context(), "python", "tools/skill-store-transport.py")
+	backgroundexec.Configure(command)
+	command.Stdin = bytes.NewReader(input)
+	var output bytes.Buffer
+	command.Stdout = &output
+	command.Stderr = io.Discard
+	if err := command.Run(); err != nil {
+		return nil, errors.New("direct Python HTTPS transport failed")
+	}
+	var decoded struct {
+		Status  int                 `json:"status"`
+		Headers map[string][]string `json:"headers"`
+		Body    []byte              `json:"body"`
+		Error   string              `json:"error"`
+	}
+	if json.Unmarshal(output.Bytes(), &decoded) != nil || decoded.Error != "" || decoded.Status < 100 || decoded.Status > 599 {
+		return nil, errors.New("invalid private transport response")
+	}
+	h := http.Header{}
+	for k, vs := range decoded.Headers {
+		for _, v := range vs {
+			h.Add(k, v)
+		}
+	}
+	return &http.Response{StatusCode: decoded.Status, Header: h, Body: io.NopCloser(bytes.NewReader(decoded.Body)), ContentLength: int64(len(decoded.Body)), Request: req}, nil
+}
+
+func skillHTTPTransport() http.RoundTripper {
+	if os.Getenv("APPLESERVICES_SKILL_HTTP_PYTHON") == "1" {
+		return skillPythonTransport{}
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return transport
+}
+
+// AuthenticateSkillStore follows the repository's icloud-plus-purchase skill.
+// It uses the host's physical Store GUID; it never alters the account Mac ADI.
+// Routing retries are bounded, and application rejections or 429 stop the run.
+func AuthenticateSkillStore(ctx context.Context, appleID, password string, codeProvider func() (string, error)) (*StoreCommerceSession, error) {
+	guid, hardware, err := storeHardwareIdentity()
+	if err != nil || isVirtualInterface("", hardware) {
+		return nil, &StorageError{Stage: "purchase-store-physical-hardware"}
+	}
+	client := &http.Client{Jar: mustCookieJar(), Transport: skillHTTPTransport(), Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return authenticateSkillStoreClient(ctx, client, guid, appleID, password, codeProvider)
+}
+
+func authenticateSkillStoreClient(ctx context.Context, client *http.Client, guid, appleID, password string, codeProvider func() (string, error)) (*StoreCommerceSession, error) {
+	endpoint := "https://auth.itunes.apple.com/auth/v1/native/fast/"
+	needsCode := false
+	for attempt, redirects := 1, 0; attempt <= 20; attempt++ {
+		code := ""
+		var err error
+		if codeProvider != nil && needsCode {
+			code, err = codeProvider()
+			if err != nil || len(code) != 6 || strings.IndexFunc(code, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+				return nil, &StorageError{Stage: "purchase-store-code"}
+			}
+		}
+		body, err := plistLoginAttemptBody(appleID, password+code, guid, 1)
+		if err != nil {
+			return nil, &StorageError{Stage: "purchase-store-request"}
+		}
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("User-Agent", skillStoreAgent)
+		resp, err := client.Do(req)
+		code = ""
+		if err != nil {
+			client.CloseIdleConnections()
+			return nil, &StorageError{Stage: "purchase-store-transport"}
+		}
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxStoreBagBytes+1))
+		resp.Body.Close()
+		if readErr != nil || len(data) > maxStoreBagBytes {
+			return nil, &StorageError{Stage: "purchase-store-response", HTTPStatus: resp.StatusCode}
+		}
+		fmt.Printf("skill Store authentication attempt=%d; HTTP=%d; response-bytes=%d\n", attempt, resp.StatusCode, len(data))
+		if dir := os.Getenv("APPLESERVICES_STORE_AUTH_DIAGNOSTIC_DIR"); dir != "" {
+			f, err := os.CreateTemp(dir, "skill-store-auth-*.json")
+			if err != nil {
+				return nil, errors.New("cannot create private Store diagnostic")
+			}
+			writeErr := json.NewEncoder(f).Encode(map[string]any{"HTTP": resp.StatusCode, "headers": resp.Header, "body": data})
+			closeErr := f.Close()
+			if writeErr != nil || closeErr != nil {
+				return nil, errors.New("cannot save private Store diagnostic")
+			}
+		}
+		if resp.StatusCode == 200 {
+			identity, err := decodeStoreLogin(data, resp.StatusCode, resp.Header)
+			if err != nil {
+				var failure *StorageError
+				if errors.As(err, &failure) && failure.Stage == "purchase-store-2fa" && codeProvider != nil {
+					if !needsCode {
+						needsCode = true
+						fmt.Println("Apple requests Store 2FA; continuing with the same cookie jar")
+						continue
+					}
+					failure.Stage = "purchase-store-code-unverified"
+				}
+				client.CloseIdleConnections()
+				return nil, err
+			}
+			identity.GUID = guid
+			return &StoreCommerceSession{client: client, identity: identity}, nil
+		}
+		if resp.StatusCode == 429 {
+			client.CloseIdleConnections()
+			return nil, &StorageError{Stage: "purchase-store-rate-limited", HTTPStatus: 429}
+		}
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 && resp.Header.Get("Location") != "" {
+			if redirects >= 4 {
+				return nil, &StorageError{Stage: "purchase-store-redirect", HTTPStatus: resp.StatusCode}
+			}
+			endpoint, err = validStoreRedirect(endpoint, resp.Header.Get("Location"))
+			if err != nil {
+				return nil, &StorageError{Stage: "purchase-store-redirect", HTTPStatus: resp.StatusCode}
+			}
+			redirects++
+			continue
+		}
+		switch resp.StatusCode {
+		case 204, 301, 302, 404, 500, 503:
+		case 403:
+			if !strings.Contains(strings.ToLower(string(data)), "<html") || resp.Header.Get("Apple-Originating-System") != "" || resp.Header.Get("X-Responding-Instance") != "" {
+				client.CloseIdleConnections()
+				return nil, &StorageError{Stage: "purchase-store-authentication", HTTPStatus: 403}
+			}
+		default:
+			client.CloseIdleConnections()
+			return nil, &StorageError{Stage: "purchase-store-authentication", HTTPStatus: resp.StatusCode}
+		}
+		if attempt == 20 {
+			client.CloseIdleConnections()
+			return nil, &StorageError{Stage: "purchase-store-authentication", HTTPStatus: resp.StatusCode}
+		}
+		select {
+		case <-ctx.Done():
+			return nil, &StorageError{Stage: "purchase-store-authentication", HTTPStatus: resp.StatusCode}
+		case <-time.After(time.Second):
+		}
+	}
+	return nil, &StorageError{Stage: "purchase-store-authentication"}
+}
+
+// SavePrivateSkillSession retains commerce credentials only in a new private
+// file. The caller must provide an owner-only directory excluded from Git.
+func (s *StoreCommerceSession) SavePrivateSkillSession(path, appleID string) error {
+	if s == nil || s.identity == nil || s.client == nil {
+		return errors.New("Store session unavailable")
+	}
+	cookies := map[string][]*http.Cookie{}
+	endpoints := []string{"https://auth.itunes.apple.com/", "https://auth.itunes.apple.com/auth/v1/native/fast/", "https://buy.itunes.apple.com/", "https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/", "https://speedysub.itunes.apple.com/", "https://speedysub.itunes.apple.com/subscription/v3/manage/"}
+	if s.identity.Pod != "" {
+		endpoints = append(endpoints, "https://p"+s.identity.Pod+"-buy.itunes.apple.com/", "https://p"+s.identity.Pod+"-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/")
+	}
+	for _, endpoint := range endpoints {
+		u, _ := url.Parse(endpoint)
+		cookies[endpoint] = s.client.Jar.Cookies(u)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return errors.New("private Store output must be a new path")
+	}
+	defer f.Close()
+	if err := json.NewEncoder(f).Encode(map[string]any{"apple-id": appleID, "identity": s.identity, "cookies": cookies}); err != nil {
+		return errors.New("cannot save private Store session")
+	}
+	return f.Sync()
+}
+
+func LoadPrivateSkillSession(path, appleID, expectedDSID string) (*StoreCommerceSession, error) {
+	data, err := os.ReadFile(path)
+	var saved struct {
+		AppleID  string                    `json:"apple-id"`
+		Identity storeSession              `json:"identity"`
+		Cookies  map[string][]*http.Cookie `json:"cookies"`
+	}
+	if err != nil || len(data) > 2<<20 || json.Unmarshal(data, &saved) != nil || !strings.EqualFold(saved.AppleID, appleID) || saved.Identity.DSID != expectedDSID || saved.Identity.PasswordToken == "" || saved.Identity.Anonymous {
+		return nil, errors.New("private Store checkpoint account binding failed")
+	}
+	guid, _, err := storeHardwareIdentity()
+	if err != nil || saved.Identity.GUID != guid {
+		return nil, errors.New("private Store checkpoint physical GUID mismatch")
+	}
+	jar, _ := cookiejar.New(nil)
+	for endpoint, cookies := range saved.Cookies {
+		u, err := url.Parse(endpoint)
+		if err != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || (u.Hostname() != "auth.itunes.apple.com" && u.Hostname() != "speedysub.itunes.apple.com" && u.Hostname() != "buy.itunes.apple.com" && u.Hostname() != "p"+saved.Identity.Pod+"-buy.itunes.apple.com") {
+			return nil, errors.New("unsupported Store cookie scope")
+		}
+		jar.SetCookies(u, cookies)
+	}
+	return &StoreCommerceSession{identity: &saved.Identity, client: &http.Client{Jar: jar, Transport: skillHTTPTransport(), Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+}
+
+func (s *StoreCommerceSession) skillRequest(ctx context.Context, method, endpoint, agent, contentType string, body []byte) ([]byte, int, error) {
+	if s == nil || s.identity == nil || s.client == nil || !s.MatchesAccount(s.identity.DSID) {
+		return nil, 0, &StorageError{Stage: "purchase-store-session"}
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || (u.Hostname() != "speedysub.itunes.apple.com" && !validStoreCommerceURL(u)) {
+		return nil, 0, &StorageError{Stage: "purchase-skill-endpoint"}
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, &StorageError{Stage: "purchase-skill-request"}
+	}
+	s.identity.setHeaders(req)
+	req.Header.Set("User-Agent", agent)
+	req.Header.Set("Accept", "application/json, application/x-apple-plist, text/html")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, 0, &StorageError{Stage: "purchase-skill-transport"}
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxStoreBagBytes+1))
+	if err != nil || len(data) > maxStoreBagBytes {
+		return nil, resp.StatusCode, &StorageError{Stage: "purchase-skill-response", HTTPStatus: resp.StatusCode}
+	}
+	if dir := os.Getenv("APPLESERVICES_STORE_AUTH_DIAGNOSTIC_DIR"); dir != "" {
+		f, err := os.CreateTemp(dir, "skill-commerce-response-*.json")
+		if err != nil {
+			return nil, resp.StatusCode, errors.New("cannot create private commerce response")
+		}
+		writeErr := json.NewEncoder(f).Encode(map[string]any{"method": method, "host": u.Hostname(), "path": u.Path, "HTTP": resp.StatusCode, "headers": resp.Header, "body": data})
+		closeErr := f.Close()
+		if writeErr != nil || closeErr != nil {
+			return nil, resp.StatusCode, errors.New("cannot retain private commerce response")
+		}
+	}
+	if resp.StatusCode != 200 {
+		return data, resp.StatusCode, &StorageError{Stage: "purchase-skill-response", HTTPStatus: resp.StatusCode}
+	}
+	return data, resp.StatusCode, nil
+}
+
+func (s *StoreCommerceSession) skillBuy(ctx context.Context, q url.Values) (map[string]any, error) {
+	values := map[string]any{}
+	for key, vs := range q {
+		if len(vs) != 1 {
+			return nil, &StorageError{Stage: "purchase-confirmation-binding"}
+		}
+		if key == "storagePlanInBytes" || key == "salableAdamId" {
+			n, err := strconv.ParseInt(vs[0], 10, 64)
+			if err != nil {
+				return nil, &StorageError{Stage: "purchase-skill-parameters"}
+			}
+			values[key] = n
+		} else {
+			values[key] = vs[0]
+		}
+	}
+	values["guid"] = s.identity.GUID
+	data, err := plist.Marshal(values, plist.XMLFormat)
+	if err != nil {
+		return nil, &StorageError{Stage: "purchase-skill-parameters"}
+	}
+	host := "buy.itunes.apple.com"
+	if s.identity.Pod != "" {
+		if _, err := strconv.ParseUint(s.identity.Pod, 10, 16); err != nil {
+			return nil, &StorageError{Stage: "purchase-store-pod"}
+		}
+		host = "p" + s.identity.Pod + "-buy.itunes.apple.com"
+	}
+	body, status, err := s.skillRequest(ctx, http.MethodPost, "https://"+host+"/WebObjects/MZFinance.woa/wa/buyProduct?guid="+url.QueryEscape(s.identity.GUID), skillStoreAgent, "application/x-apple-plist", data)
+	if err != nil {
+		return nil, err
+	}
+	var response map[string]any
+	if _, err := plist.Unmarshal(body, &response); err != nil {
+		return nil, &StorageError{Stage: "purchase-skill-decode", HTTPStatus: status}
+	}
+	return response, nil
+}
+
+// SubmitSkillPurchase sends the skill's native offer, and at most one exact
+// Apple-issued auto-renew confirmation. It never uses presentOffers POST.
+func (s *StoreCommerceSession) SubmitSkillPurchase(ctx context.Context, info *StoragePlanInfo, target PurchaseTarget, expectedTerms string) (*PurchaseResult, error) {
+	if err := ValidatePurchaseTarget(info, target); err != nil {
+		return nil, err
+	}
+	if target.Bytes != 50*1024*1024*1024 || target.PriceMinor != 600 || target.Currency != "CNY" || target.Period != "month" {
+		return nil, &StorageError{Stage: "purchase-skill-offer"}
+	}
+	u, _ := url.Parse(DirectStorageOfferURL(s.identity.GUID))
+	q := u.Query()
+	for k, v := range map[string]string{"hasAskedToFulfillPreorder": "true", "hasDoneAgeCheck": "true", "buyWithoutAuthorization": "true", "needDiv": "0", "origPage": "Software-1581031638", "origPageLocation": "Buy"} {
+		q.Set(k, v)
+	}
+	r, err := s.skillBuy(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	if fmt.Sprint(r["failureType"]) == "3038" {
+		if err := s.acceptSkillTerms(ctx, r, q, expectedTerms); err != nil {
+			return nil, err
+		}
+		r, err = s.skillBuy(ctx, q)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if failure, ok := r["failureType"]; ok && fmt.Sprint(failure) != "" && fmt.Sprint(failure) != "0" {
+		return nil, &StorageError{Stage: "purchase-skill-buy", HTTPStatus: 200, AppleCode: fmt.Sprint(failure)}
+	}
+	if dialog, ok := r["dialog"].(map[string]any); ok {
+		action, _ := dialog["okButtonAction"].(map[string]any)
+		if dialog["dialogId"] != "SRVOrderManager.ConfirmBuyingAutoRenewingSubscription" || action["kind"] != "Buy" {
+			return &PurchaseResult{State: "confirmation-required", HTTPStatus: 200}, nil
+		}
+		params, _ := action["buyParams"].(string)
+		next, err := url.ParseQuery(params)
+		if err != nil || len(params) > 65536 {
+			return nil, &StorageError{Stage: "purchase-confirmation-binding"}
+		}
+		if err := validateNativeStorageConfirmation(next, q, s.identity); err != nil {
+			return nil, err
+		}
+		next.Set("hasShownExtraConfirmationNeededForBuyRecurringItem", "true")
+		r, err = s.skillBuy(ctx, next)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if failure, ok := r["failureType"]; ok && fmt.Sprint(failure) != "" && fmt.Sprint(failure) != "0" {
+		return nil, &StorageError{Stage: "purchase-skill-buy", HTTPStatus: 200, AppleCode: fmt.Sprint(failure)}
+	}
+	if r["jingleDocType"] == "purchaseSuccess" && r["jingleAction"] == "purchaseProduct" && fmt.Sprint(r["status"]) == "0" {
+		return &PurchaseResult{State: "completed", HTTPStatus: 200}, nil
+	}
+	return &PurchaseResult{State: "verification-pending", HTTPStatus: 200}, nil
+}
+
+func findSkillValue(v any, key string) any {
+	switch x := v.(type) {
+	case map[string]any:
+		if val, ok := x[key]; ok {
+			return val
+		}
+		for _, val := range x {
+			if r := findSkillValue(val, key); r != nil {
+				return r
+			}
+		}
+	case []any:
+		for _, val := range x {
+			if r := findSkillValue(val, key); r != nil {
+				return r
+			}
+		}
+	}
+	return nil
+}
+
+func (s *StoreCommerceSession) acceptSkillTerms(ctx context.Context, r map[string]any, offer url.Values, expected string) error {
+	if expected == "" {
+		return &StorageError{Stage: "purchase-skill-terms-consent"}
+	}
+	host := "buy.itunes.apple.com"
+	if s.identity.Pod != "" {
+		host = "p" + s.identity.Pod + "-buy.itunes.apple.com"
+	}
+	base := "https://" + host + "/WebObjects/MZFinance.woa/wa/"
+	data, _, err := s.skillRequest(ctx, http.MethodGet, base+"termsCheckSrv?guid="+url.QueryEscape(s.identity.GUID), skillStoreAgent, "", nil)
+	if err != nil {
+		return err
+	}
+	var state map[string]any
+	if json.Unmarshal(data, &state) != nil || fmt.Sprint(findSkillValue(state, "latestTermsVersionId")) != expected {
+		return &StorageError{Stage: "purchase-skill-terms-version"}
+	}
+	var page string
+	var links func(any)
+	links = func(v any) {
+		switch x := v.(type) {
+		case string:
+			if strings.Contains(x, "/termsPage?") {
+				u, e := url.Parse(x)
+				if e == nil && validStoreCommerceURL(u) {
+					page = x
+				}
+			}
+		case map[string]any:
+			for _, v := range x {
+				links(v)
+			}
+		case []any:
+			for _, v := range x {
+				links(v)
+			}
+		}
+	}
+	links(r)
+	if page == "" {
+		return &StorageError{Stage: "purchase-skill-terms-page"}
+	}
+	data, _, err = s.skillRequest(ctx, http.MethodGet, page, "AppStore/3.0 (Macintosh; OS X 15.4.1; 24E263)", "", nil)
+	if err != nil {
+		return err
+	}
+	for _, form := range parseStoreForms(data) {
+		if !strings.Contains(form.action, "agreeToTermsUpdate") {
+			continue
+		}
+		origin, _ := url.Parse(page)
+		dest, err := storeFormURL(origin, data, form.action)
+		if err != nil || dest.Query().Get("termsId") != expected || form.method != http.MethodPost {
+			return &StorageError{Stage: "purchase-skill-terms-form"}
+		}
+		checkboxes := 0
+		for i := range form.fields {
+			if form.fields[i].typ == "checkbox" {
+				form.fields[i].checked = true
+				checkboxes++
+			}
+		}
+		if checkboxes != 1 {
+			return &StorageError{Stage: "purchase-skill-terms-controls"}
+		}
+		ack, _, err := s.skillRequest(ctx, http.MethodPost, dest.String(), "AppStore/3.0 (Macintosh; OS X 15.4.1; 24E263)", "application/x-www-form-urlencoded", []byte(encodeStoreForm(form, "")))
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(string(ack), "You've accepted the new Terms of Service") {
+			return &StorageError{Stage: "purchase-skill-terms-acknowledgement"}
+		}
+		return nil
+	}
+	return &StorageError{Stage: "purchase-skill-terms-form"}
+}
+
+type SkillSubscriptionInfo struct {
+	Present       bool   `json:"present"`
+	StorageAmount string `json:"storage_amount,omitempty"`
+	StorageUsage  string `json:"storage_usage,omitempty"`
+	PaidPrice     string `json:"paid_price,omitempty"`
+	PlanName      string `json:"plan_name,omitempty"`
+	AutoRenew     bool   `json:"auto_renew"`
+	Verified50GB  bool   `json:"verified_50gb"`
+}
+
+func (s *StoreCommerceSession) ReadSkillSubscription(ctx context.Context) (*SkillSubscriptionInfo, error) {
+	data, _, err := s.skillRequest(ctx, http.MethodGet, "https://speedysub.itunes.apple.com/subscription/v3/manage/list", skillStoreAgent, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	var list map[string]any
+	if json.Unmarshal(data, &list) != nil {
+		return nil, &StorageError{Stage: "purchase-skill-subscription-list"}
+	}
+	active, ok := findSkillValue(list, "active").([]any)
+	if !ok {
+		return nil, &StorageError{Stage: "purchase-skill-subscription-list"}
+	}
+	for _, entry := range active {
+		raw, _ := json.Marshal(entry)
+		if !strings.Contains(strings.ToLower(string(raw)), "icloud") && !strings.Contains(string(raw), storeSalableAdamID) {
+			continue
+		}
+		id := findSkillValue(entry, "subscriptionId")
+		if id == nil {
+			return nil, &StorageError{Stage: "purchase-skill-subscription-id"}
+		}
+		data, _, err = s.skillRequest(ctx, http.MethodGet, "https://speedysub.itunes.apple.com/subscription/v3/manage/detail?subscriptionId="+url.QueryEscape(fmt.Sprint(id)), skillStoreAgent, "", nil)
+		if err != nil {
+			return nil, err
+		}
+		var detail map[string]any
+		if json.Unmarshal(data, &detail) != nil {
+			return nil, &StorageError{Stage: "purchase-skill-subscription-detail"}
+		}
+		info := &SkillSubscriptionInfo{Present: true}
+		info.StorageAmount, _ = findSkillValue(detail, "storageAmount").(string)
+		info.StorageUsage, _ = findSkillValue(detail, "storageUsage").(string)
+		plan, _ := findSkillValue(detail, "latestPlan").(map[string]any)
+		info.PaidPrice, _ = plan["paidPrice"].(string)
+		info.PlanName, _ = plan["displayName"].(string)
+		info.AutoRenew, _ = findSkillValue(detail, "isAutoRenewEnabled").(bool)
+		amount := strings.ReplaceAll(strings.ReplaceAll(info.StorageAmount, "\u00a0", ""), " ", "")
+		info.Verified50GB = strings.ToUpper(amount) == "50GB" && (info.PaidPrice == "\u00a56.00" || info.PaidPrice == "\uffe56.00" || info.PaidPrice == "CNY 6.00")
+		return info, nil
+	}
+	return &SkillSubscriptionInfo{}, nil
+}

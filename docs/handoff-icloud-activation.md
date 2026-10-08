@@ -25,6 +25,15 @@
 - 测试覆盖原生请求报价、修改价格/容量/账号后的拒绝、验证码拒绝与 429 不重试。协议测试通过不替代真实付费验收。当前购买仍未完成；后续应先解决商店认证，且继续复查实时容量，禁止盲目重放旧订单。
 - 继续使用本账号 Mac 生成验证码并按 Apple 当前 App Store bag 保留 native endpoint、SAP 签名和 App Store 请求头后，商店认证仍返回 HTTP 429（响应给出 Retry-After=3；等待后再次返回 429）。未发送购买 POST，实时容量仍为 5 GiB、付费容量 0。Apple 的 301/302/404/503/429 仅是认证链状态，不能当作成功或扣款。
 
+### 改按项目购买 skill 执行后的复核
+
+- 项目已有 `.claude/skills/icloud-plus-purchase/SKILL.md`，与 Mac/NAC 激活 skill 分属两个流程。此前只读取激活 skill，并错误概括“没有购买成功记录”；该结论已撤回。
+- 旧 Hotmail 的成功证据在原 Claude 项目会话中：Apple 返回 `purchaseSuccess` 与 CNY 购买指标；后续 `speedysub` 订阅详情报告实际 `50 GB` 配额，并有关闭自动续费后的状态记录。不是当前 QQ 账号的验收证据，也不能当作 Hotmail 当前实时状态。
+- `icloudpurchase -claude-skill -native-store` 现使用本机物理网卡商店 GUID（与旧成功记录一致），不改 QQ 原来的 Mac/ADI/APS 身份。采用成功登录代码的完整 Configurator UA、保留默认 HTTP 传输能力并禁用代理。认证先只提交密码，Apple 要求 2FA 后才在同一 cookie jar 中加入验证码。
+- 该分支直接发送 skill 的原生 plist `buyProduct`，含整数 storagePlanInBytes、appAdamId 和完整参数；仅在已授权且报价/会话匹配时回放 Apple 的完整 Buy 参数及额外续费确认字段。3038 时只接受用户此前批准的媒体服务版本，条款页与提交共用 cookie jar。
+- 下单前查询已有 iCloud 订阅以避免重复购买；下单后通过 `speedysub` list/detail 的 specialSubInfo、付费价格核验真实 50 GB。支持新私有商店 checkpoint 保存与账户/物理 GUID 绑定恢复；不保存密码或验证码。
+- 本次做了有上限的直连认证对照，含 Go 传输、Python requests 传输和完整成功请求设置。Apple 仍仅返回 204、无有效跳转的 301/302、HTML 403/404/500/503，没有商店令牌。当前没有进入原生下单或确认请求，QQ 的实时 MME 配额仍为 5 GiB、付费容量 0。以上不能证明账号不支持购买，也不能报告订阅完成。
+
 ### 当前目标 01-account 的最新直连复测
 
 - Windows CoreADI 使用该目录下独立且稳定的 Windows 身份，GSA 使用新会话。用户提供的两个密码变体已分别测试；其中一个通过服务器 SRP proof 并进入 2FA，另一个在 `complete / s2k` 返回 `ec=-22406`。文档不保存密码。

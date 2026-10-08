@@ -30,7 +30,16 @@ func run() error {
 	storeRetries := flag.Int("store-auth-retries", 0, "at most 3 routing-error retries during Store authentication; never retry a purchase")
 	signedStore := flag.Bool("signed-store", false, "SAP-sign this Mac's native Store authentication")
 	appStoreProfile := flag.Bool("appstore-profile", false, "use the exact Apple bag endpoint and account Mac App Store headers with SAP")
+	claudeSkill := flag.Bool("claude-skill", false, "follow .claude icloud-plus-purchase with physical Store GUID and native plist flow")
+	storeSessionOut := flag.String("store-session-out", "", "new owner-only output retaining this account's Store credentials and cookies")
+	storeSessionIn := flag.String("store-session-in", "", "private Store session for this account and physical GUID")
 	flag.Parse()
+	if *claudeSkill && !*nativeStore {
+		return fmt.Errorf("claude-skill requires native-store")
+	}
+	if *storeSessionIn != "" && (!*claudeSkill || !*nativeStore) {
+		return fmt.Errorf("private Store resume requires the native purchase skill")
+	}
 	if *storeRetries < 0 || *storeRetries > 3 {
 		return fmt.Errorf("Store authentication retries must be between 0 and 3")
 	}
@@ -48,7 +57,7 @@ func run() error {
 	if *localStoreCode && (!*nativeStore && !*storeCheck || storeCode != "") {
 		return fmt.Errorf("local-store-code requires native Store mode and cannot combine with a supplied code")
 	}
-	if username == "" || password == "" {
+	if username == "" || (password == "" && *storeSessionIn == "") {
 		return fmt.Errorf("credentials required through environment")
 	}
 	var saved appleservices.Session
@@ -140,7 +149,18 @@ func run() error {
 			}
 			fmt.Println("same-account local Mac code generated in memory; no SMS requested")
 		}
-		if *appStoreProfile {
+		if *storeSessionIn != "" {
+			commerce, err = icloud.LoadPrivateSkillSession(*storeSessionIn, username, accepted.Session.DSID)
+		} else if *claudeSkill {
+			fmt.Println("repository purchase skill: physical host Store GUID; account Mac retained for iCloud")
+			var provider func() (string, error)
+			if *localStoreCode {
+				provider = func() (string, error) { return native.Code(ctx) }
+			} else if storeCode != "" {
+				provider = func() (string, error) { return storeCode, nil }
+			}
+			commerce, err = icloud.AuthenticateSkillStore(ctx, username, password, provider)
+		} else if *appStoreProfile {
 			fmt.Println("native App Store profile; signed exact Apple bag endpoint; account Mac retained")
 			commerce, err = icloud.AuthenticateAppStoreForHardware(ctx, username, password, storeCode, headers, nativeadi.SyntheticMACAddress(device.Identifier), *storeRetries)
 		} else if *signedStore {
@@ -166,6 +186,11 @@ func run() error {
 		if !commerce.MatchesAccount(accepted.Session.DSID) {
 			return fmt.Errorf("Store account binding failed; purchase not submitted")
 		}
+		if *storeSessionOut != "" {
+			if err := commerce.SavePrivateSkillSession(*storeSessionOut, username); err != nil {
+				return err
+			}
+		}
 		if *storeCheck {
 			return nil
 		}
@@ -173,7 +198,18 @@ func run() error {
 	// One call only. Never replay an ambiguous purchase response automatically.
 	var result *icloud.PurchaseResult
 	var purchaseErr error
-	if *nativeStore {
+	if *claudeSkill {
+		before, err := commerce.ReadSkillSubscription(ctx)
+		if err != nil {
+			return err
+		}
+		if before.Present {
+			encoded, _ := json.Marshal(before)
+			fmt.Printf("existing iCloud subscription; purchase not submitted; %s\n", encoded)
+			return nil
+		}
+		result, purchaseErr = commerce.SubmitSkillPurchase(ctx, plans, target, "290399")
+	} else if *nativeStore {
 		result, purchaseErr = commerce.SubmitConfirmedStoragePurchase(ctx, plans, username, password, accepted.Session.DSID, accepted.ADSID, token, storageToken, headers, target)
 	} else {
 		result, purchaseErr = icloud.SubmitStoragePurchaseAnonymous(ctx, plans, username, password, accepted.Session.DSID, accepted.ADSID, token, storageToken, headers, target)
@@ -184,8 +220,20 @@ func run() error {
 	defer verifyCancel()
 	updated, quotaErr := icloud.FetchStorageInfo(verifyCtx, accepted.ServiceData, username, accepted.Session.DSID, accepted.ADSID, token, headers)
 	status := map[string]any{"stage": "returned", "purchase-result": result, "quota-read-success": quotaErr == nil}
+	var subscription *icloud.SkillSubscriptionInfo
+	var subscriptionErr error
+	if *claudeSkill {
+		subscription, subscriptionErr = commerce.ReadSkillSubscription(verifyCtx)
+		status["subscription"] = subscription
+		if subscriptionErr != nil {
+			status["subscription-error"] = subscriptionErr.Error()
+		}
+	}
 	if purchaseErr != nil {
 		status["purchase-error"] = purchaseErr.Error()
+		if e, ok := purchaseErr.(*icloud.StorageError); ok && e.AppleCode != "" {
+			status["apple-code"] = e.AppleCode
+		}
 	}
 	if quotaErr != nil {
 		status["quota-error"] = quotaErr.Error()
@@ -194,6 +242,9 @@ func run() error {
 		status["total-bytes"], status["paid-bytes"] = updated.TotalBytes, updated.PaidBytes
 	}
 	completed := result != nil && result.State == "completed" && purchaseErr == nil && quotaErr == nil && updated.TotalBytes >= target.Bytes && updated.PaidBytes >= target.Bytes
+	if *claudeSkill {
+		completed = result != nil && result.State == "completed" && purchaseErr == nil && subscriptionErr == nil && subscription != nil && subscription.Verified50GB
+	}
 	status["purchase-completed-and-quota-verified"] = completed
 	if err := enc.Encode(status); err != nil {
 		return fmt.Errorf("cannot preserve attempt result; inspect quota before retry")
