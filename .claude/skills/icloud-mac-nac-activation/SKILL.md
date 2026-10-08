@@ -22,6 +22,8 @@ For purchases and paid-subscription checks in this repository, read `.claude/ski
 
 ## Workflow
 
+For execution in this repository, read [references/windows-runbook.md](references/windows-runbook.md). It contains the CLI sequence, private-directory setup, live verification-code handoff and checkpoint reuse. Run from the repository root; the installed global skill is a copy of these instructions, not a bundled client or runtime.
+
 1. **Map the current state.** Identify the account directory, device identity, native ADI profile, saved GSA session, accepted terms state, and any prior delegate response. Exclude archived or unrelated accounts. Preserve uncommitted changes.
    - When the user requires a separate Mac per account, compare UUID, serial, network address, effective ROM/MLB, ADI MID and APS token between the selected accounts. Different UUIDs alone do not establish isolation. Matching model/board names are normal for separate instances of one Mac model.
    - Read [references/mac-isolation.md](references/mac-isolation.md) for this project's legacy shared-address/shared-Windows-push issue and the verified repair path.
