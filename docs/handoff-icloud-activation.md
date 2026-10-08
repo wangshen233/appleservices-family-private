@@ -49,6 +49,15 @@
 - 沿 Apple 返回且校验过的当前设备 GET 详情链接查询，序列号与本地配置匹配，返回 `trustedDevice=true`、`untrusted=false`、`supportsVerificationCodes=true`，确认该模拟 Mac 已在账号内并被标记为受信任。
 - 同一详情的 `pushDevice=false`。受信任和支持验证码的标志不能替代当前本地客户端接收推送验证码的实测。全部原始设备数据仅保存到私有文件，文档不保存设备 ID、序列号或令牌。
 
+### 02-account 本地验证码与推送的实际测试
+
+- 新增 `tools/trustedcodecheck`，用本账号原 Mac 作为接收端，以独立 UUID、序列号、ADI 和 Mac APS 的临时诊断身份作为发起端。接收端的推送令牌与本地已保存硬件匹配，新登录无需 2FA；不调用设备登记、条款、购买或通知批准接口。
+- 第一项测试：临时发起端通过密码校验并明确需要 `trustedDeviceSecondaryAuth`。Apple 接受一次可信设备验证码请求；本地 Mac 原生生成的六位码在内存中提交，Apple 接受，随后同一临时身份完成 2FA 并取得实际 PET。`local-code-proved-by-complete-2fa=true`，验证码未打印或保存。
+- 第一项的 45 秒观察收到同账号 `cmd=1200` 状态通知。为排除通知队列在登录后被清空、立即验证码验证结束请求的影响，另做一次只观察推送的测试：保留登录过程中产生的通知，并暂不提交验证码。
+- 第二项测试：独立临时发起端同样需要可信设备 2FA，请求被 Apple 接受。在 45 秒窗口内，本地客户端收到同账号 `cmd=100` 登录验证请求，未收到无法归属的未知通知；`approvals-sent=0`。因此确认本地可接收该账号 AuthKit 登录验证请求，不依赖 `pushDevice` 字段推断实际投递。
+- AuthKit 登录通知与六位验证码是两项证据：此次收到的是登录请求通知，六位码由本地原生模块生成，并已通过真实 2FA 验收。没有声称通知本身携带明文验证码。
+- 新 Mac 首次初始化时，原生模块会写出尚无 APS token 的硬件文件，其读取器不能恢复该状态。引导工具现保留刚创建的配置/身份句柄直到真实 Mac APS 激活完成，不填入假 token；已存在的完整 Mac 凭据仍保持重用。
+
 独立 `accountsetupcheck -delegate-only` 提交流程已成功。严格 worker 的复测仍返回 `HTTP 409 / ICLOUD_UNSUPPORTED_DEVICE / reason-code 3001`；这表示 worker 的默认会话或请求上下文仍与已验证的独立探针不同，不能覆盖独立探针已经取得的 MME 和配额证据。
 
 原文的“唯一根因已经定位”“代码侧彻底排除”“必须先登录真机”均超出了现有证据。原文快照保留在本地 `.cache/handoff-icloud-activation-original.md`，其中账号资料不应发布。
