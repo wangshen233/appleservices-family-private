@@ -90,7 +90,8 @@ func (c *Client) GetHeaders(s State) (map[string]string, error) {
 		"X-Mme-Client-Info":     c.clientInfo,
 		"X-Mme-Device-Id":       s.DeviceID(),
 		"X-Apple-I-Client-Time": time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-		"X-Apple-I-TimeZone":    "GMT",
+		"X-Apple-I-TimeZone":    "UTC",
+		"X-Apple-Locale":        "en_US",
 	}
 	if c.userAgent != "" {
 		h["User-Agent"] = c.userAgent
