@@ -80,6 +80,15 @@ For an owner who uses existing trusted devices:
 
 The misleadingly named `-sms-code-file` is also used by device mode. The file must not exist when the challenge starts. Wait for `trusted-device code request accepted` and `awaiting a code for this live challenge`; then obtain a new owner-provided code and write it privately to that path while the CLI is still running. Do not start a replacement login, combine SMS flags with device mode, or reuse a code from history. Delete the code file after use. The CLI's context expires after three minutes; prepare builds and paths before requesting a code.
 
+For an explicitly selected local-code diagnostic, keep that live challenge open and hand the bound Mac's code directly to its new private file:
+
+```powershell
+go build -o bin/localcodehandoff.exe ./tools/localcodehandoff
+.\bin\localcodehandoff.exe -dir $accountDir -out "$runDir/device-code.txt"
+```
+
+The helper never prints the code and refuses to overwrite a file. Delete the handoff after the live process consumes it. A six-digit output is only local generation evidence; require Apple to accept it. If validation returns `-21669`, stop local-code attempts for that account and use an actually available trusted device or phone recovery path.
+
 For explicitly chosen SMS delivery, omit `-trusted-device-code` and use the same private-file handoff. If Apple reports `tooManyCodesSent=true` / `-22981`, stop requesting SMS. Do not infer recovery duration. If no 2FA is required, the same command completes directly. Local generation is a separate opt-in diagnostic and requires demonstrated acceptance for the same account; device trust alone is insufficient.
 
 When the owner has only this account's local diagnostic Mac, test delivery without approving a notification or completing the requester login:
