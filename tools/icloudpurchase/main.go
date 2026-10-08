@@ -24,6 +24,7 @@ func run() error {
 	acceptedFile := flag.String("accepted", "", "private accepted iCloud checkpoint")
 	journalFile := flag.String("journal", "", "new owner-only attempt journal; never replay an existing attempt")
 	confirm := flag.Bool("confirm-cn-50gb", false, "owner has explicitly authorized CN 50GB at CNY 6 per month")
+	cancelAutoRenew := flag.Bool("cancel-auto-renew", false, "disable renewal for the existing iCloud+ subscription; service remains active until expiry")
 	storeCheck := flag.Bool("store-check-only", false, "check this Mac's native Store authentication without any purchase")
 	nativeStore := flag.Bool("native-store", false, "use this account Mac's authenticated native Store and exact returned confirmation")
 	localStoreCode := flag.Bool("local-store-code", false, "generate a code on this account's existing trusted Mac; never request SMS")
@@ -51,7 +52,7 @@ func run() error {
 	if *storeRetries < 0 || *storeRetries > 3 {
 		return fmt.Errorf("Store authentication retries must be between 0 and 3")
 	}
-	if !*confirm || *dir == "" || *acceptedFile == "" || *journalFile == "" {
+	if (!*confirm && !*cancelAutoRenew) || *dir == "" || *acceptedFile == "" || *journalFile == "" {
 		return fmt.Errorf("explicit purchase confirmation, account, accepted checkpoint and new private journal required")
 	}
 	if _, err := os.Stat(*journalFile); !os.IsNotExist(err) {
@@ -132,19 +133,22 @@ func run() error {
 	}
 	fmt.Printf("pre-purchase quota; total-bytes=%d; paid-bytes=%d\n", quota.TotalBytes, quota.PaidBytes)
 	// Do not submit any upgrade while a paid plan is already present.
-	if quota.PaidBytes != 0 {
+	if quota.PaidBytes != 0 && !*cancelAutoRenew {
 		return fmt.Errorf("existing paid capacity detected; purchase not submitted")
 	}
 	target := icloud.PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 600, Currency: "CNY", Period: "month"}
 	storageToken := saved.Tokens["com.apple.gs.icloud.storage.buy"]
-	plans, err := icloud.FetchStorefrontPlanInfoWithStorageToken(ctx, username, accepted.Session.DSID, accepted.ADSID, token, storageToken, headers)
-	if err != nil {
-		return err
+	var plans *icloud.StoragePlanInfo
+	if !*cancelAutoRenew {
+		plans, err = icloud.FetchStorefrontPlanInfoWithStorageToken(ctx, username, accepted.Session.DSID, accepted.ADSID, token, storageToken, headers)
+		if err != nil {
+			return err
+		}
+		if err := icloud.ValidatePurchaseTarget(plans, target); err != nil {
+			return err
+		}
+		fmt.Println("exact Apple offer verified: CN 50GB CNY 600 minor units/month")
 	}
-	if err := icloud.ValidatePurchaseTarget(plans, target); err != nil {
-		return err
-	}
-	fmt.Println("exact Apple offer verified: CN 50GB CNY 600 minor units/month")
 	journal, err := os.OpenFile(*journalFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return fmt.Errorf("cannot create new private attempt journal")
@@ -250,9 +254,27 @@ func run() error {
 			return err
 		}
 		if before.Present {
+			if *cancelAutoRenew {
+				if err := commerce.CancelSkillAutoRenew(ctx, before); err != nil {
+					return err
+				}
+				check, err := commerce.ReadSkillSubscription(ctx)
+				if err != nil {
+					return err
+				}
+				encoded, _ := json.Marshal(check)
+				fmt.Printf("auto-renew cancellation verified: %s\n", encoded)
+				if check.AutoRenew {
+					return fmt.Errorf("auto-renew is still enabled")
+				}
+				return nil
+			}
 			encoded, _ := json.Marshal(before)
 			fmt.Printf("existing iCloud subscription; purchase not submitted; %s\n", encoded)
 			return nil
+		}
+		if *cancelAutoRenew {
+			return fmt.Errorf("no active iCloud+ subscription to cancel")
 		}
 		result, purchaseErr = commerce.SubmitSkillPurchase(ctx, plans, target, "290399")
 	} else if *nativeStore {

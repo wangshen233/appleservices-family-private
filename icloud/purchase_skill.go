@@ -591,13 +591,14 @@ func (s *StoreCommerceSession) acceptSkillTerms(ctx context.Context, r map[strin
 }
 
 type SkillSubscriptionInfo struct {
-	Present       bool   `json:"present"`
-	StorageAmount string `json:"storage_amount,omitempty"`
-	StorageUsage  string `json:"storage_usage,omitempty"`
-	PaidPrice     string `json:"paid_price,omitempty"`
-	PlanName      string `json:"plan_name,omitempty"`
-	AutoRenew     bool   `json:"auto_renew"`
-	Verified50GB  bool   `json:"verified_50gb"`
+	SubscriptionID string `json:"subscription_id,omitempty"`
+	Present        bool   `json:"present"`
+	StorageAmount  string `json:"storage_amount,omitempty"`
+	StorageUsage   string `json:"storage_usage,omitempty"`
+	PaidPrice      string `json:"paid_price,omitempty"`
+	PlanName       string `json:"plan_name,omitempty"`
+	AutoRenew      bool   `json:"auto_renew"`
+	Verified50GB   bool   `json:"verified_50gb"`
 }
 
 func (s *StoreCommerceSession) ReadSkillSubscription(ctx context.Context) (*SkillSubscriptionInfo, error) {
@@ -631,6 +632,7 @@ func (s *StoreCommerceSession) ReadSkillSubscription(ctx context.Context) (*Skil
 			return nil, &StorageError{Stage: "purchase-skill-subscription-detail"}
 		}
 		info := &SkillSubscriptionInfo{Present: true}
+		info.SubscriptionID = fmt.Sprint(id)
 		info.StorageAmount, _ = findSkillValue(detail, "storageAmount").(string)
 		info.StorageUsage, _ = findSkillValue(detail, "storageUsage").(string)
 		plan, _ := findSkillValue(detail, "latestPlan").(map[string]any)
@@ -642,4 +644,50 @@ func (s *StoreCommerceSession) ReadSkillSubscription(ctx context.Context) (*Skil
 		return info, nil
 	}
 	return &SkillSubscriptionInfo{}, nil
+}
+
+// CancelSkillAutoRenew requests cancellation and submits Apple's exact
+// confirmation parameters. The service remains active until its expiry.
+func (s *StoreCommerceSession) CancelSkillAutoRenew(ctx context.Context, sub *SkillSubscriptionInfo) error {
+	if sub == nil || !sub.Present || sub.SubscriptionID == "" || !sub.AutoRenew {
+		return &StorageError{Stage: "purchase-skill-cancel-precondition"}
+	}
+	q := url.Values{"subscriptionId": {sub.SubscriptionID}, "cancelSubscription": {"true"}, "salableAdamId": {storeSalableAdamID}}
+	data, _, err := s.skillRequest(ctx, http.MethodPost, "https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/buyProduct?guid="+url.QueryEscape(s.identity.GUID), skillStoreAgent, "application/x-www-form-urlencoded", []byte(q.Encode()))
+	if err != nil {
+		return err
+	}
+	var first map[string]any
+	if _, err := plist.Unmarshal(data, &first); err != nil {
+		return &StorageError{Stage: "purchase-skill-cancel-decode"}
+	}
+	action, _ := findSkillValue(first, "okButtonAction").(map[string]any)
+	if fmt.Sprint(action["kind"]) != "Buy" {
+		return &StorageError{Stage: "purchase-skill-cancel-confirmation"}
+	}
+	params := fmt.Sprint(action["buyParams"])
+	if params == "" || len(params) > 65536 {
+		return &StorageError{Stage: "purchase-skill-cancel-confirmation"}
+	}
+	next, err := url.ParseQuery(params)
+	if err != nil {
+		return &StorageError{Stage: "purchase-skill-cancel-confirmation"}
+	}
+	next.Set("cancelSubscription", "true")
+	next.Set("subscriptionId", sub.SubscriptionID)
+	next.Set("salableAdamId", storeSalableAdamID)
+	next.Set("guid", s.identity.GUID)
+	next.Set("hasConfirmedBuySubscription", "true")
+	data, _, err = s.skillRequest(ctx, http.MethodPost, "https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/buyProduct?guid="+url.QueryEscape(s.identity.GUID), skillStoreAgent, "application/x-www-form-urlencoded", []byte(next.Encode()))
+	if err != nil {
+		return err
+	}
+	var result map[string]any
+	if _, err := plist.Unmarshal(data, &result); err != nil {
+		return &StorageError{Stage: "purchase-skill-cancel-decode"}
+	}
+	if fmt.Sprint(result["jingleDocType"]) != "purchaseSuccess" || fmt.Sprint(result["status"]) != "0" {
+		return &StorageError{Stage: "purchase-skill-cancel-result"}
+	}
+	return nil
 }

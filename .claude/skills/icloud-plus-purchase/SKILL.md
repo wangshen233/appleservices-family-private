@@ -24,6 +24,18 @@ go build -o bin/icloudpurchase.exe ./tools/icloudpurchase
   -local-store-code -store-session-out <new-private-store.json>
 ```
 
+关闭已购买套餐的自动续费时，必须复用同一账号、同一物理 GUID 的 Store 会话：
+
+```powershell
+.\bin\icloudpurchase.exe -claude-skill -native-store -cancel-auto-renew `
+  -dir state/accounts/<selected-account> `
+  -accepted <private-accepted-icloud.json> `
+  -journal <new-private-cancel.jsonl> `
+  -store-session-in <private-store-session.json>
+```
+
+取消流程是固定的：读取当前订阅 ID → 发起 `cancelSubscription=true` → 只提交 Apple 返回的确认参数 → 重新读取订阅详情。只有详情中的 `isAutoRenewEnabled=false` 才算完成；服务容量应仍为 50GB，直到当前周期结束。若会话失效，停止并重新建立同账号商店会话，不能猜测订阅 ID 或重复提交取消请求。
+
 凭据通过进程环境输入。所有输出路径必须位于仅当前用户可访问的 Git 忽略目录。`-local-store-code` 生成成功不代表商店接受；仅在 Apple 明确请求 2FA 后向同一会话附加新验证码。没有本账号已验证的本地码时使用新的用户设备码，不能借用其他账号的码。
 
 可用 `-store-check-only` 只验证商店认证，或用 `-store-session-in` 复用本账号和物理 GUID 绑定的有效商店 checkpoint。该模式最多执行 20 次认证路由尝试；应用错误及 429 停止，购买或不明确认响应不自动重放。
