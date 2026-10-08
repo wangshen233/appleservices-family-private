@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -59,6 +60,24 @@ func main() {
 	}
 	fmt.Println("PROVISION OK")
 	fmt.Printf("  adi_pb len = %d\n", len(state.AdiPB))
+
+	// Persist the issued blob into device.json. The login path treats a
+	// non-empty ProvisioningBlob as proof the device is already provisioned and
+	// skips this exchange, so a placeholder there means every header is derived
+	// from an unregistered identity.
+	if len(state.AdiPB) > 0 {
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err == nil {
+			raw["ProvisioningBlob"] = base64.StdEncoding.EncodeToString(state.AdiPB)
+			if encoded, err := json.MarshalIndent(raw, "", "  "); err == nil {
+				if err := os.WriteFile(filepath.Join(dir, "device.json"), encoded, 0o600); err != nil {
+					fmt.Println("could not save the issued blob:", err)
+					os.Exit(1)
+				}
+				fmt.Println("  saved to device.json")
+			}
+		}
+	}
 
 	headers, err := client.GetHeaders(state)
 	if err != nil {

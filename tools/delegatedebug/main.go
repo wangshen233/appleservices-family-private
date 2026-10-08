@@ -115,11 +115,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	req, _ := http.NewRequest("POST", host+"/setup/iosbuddy/loginDelegates", bytes.NewReader(buf.Bytes()))
+	req, _ := http.NewRequest("POST", host+"/setup/prefpane/loginDelegates", bytes.NewReader(buf.Bytes()))
 	req.Header.Set("Content-Type", "text/plist")
 	req.Header.Set("X-Apple-ADSID", s.DSID)
-	req.Header.Set("Cookie", "termsAccepted=true")
-	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(s.AppleID+":"+pet)))
+	// The prefpane endpoint authenticates the account with the MobileMe token
+	// scheme rather than the Apple ID and PET used by the iosbuddy endpoint.
+	authScheme := os.Getenv("APPLESERVICES_DELEGATE_AUTH")
+	if authScheme == "" {
+		authScheme = "basic"
+	}
+	switch authScheme {
+	case "mme":
+		req.Header.Set("Authorization", "X-MobileMe-AuthToken "+base64.StdEncoding.EncodeToString([]byte(s.DSID+":"+pet)))
+	case "mme-pet":
+		req.Header.Set("Authorization", "X-MobileMe-AuthToken "+base64.StdEncoding.EncodeToString([]byte(s.AppleID+":"+pet)))
+	default:
+		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(s.AppleID+":"+pet)))
+	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -133,7 +145,7 @@ func main() {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
-	fmt.Printf("\n=== POST %s/setup/iosbuddy/loginDelegates ===\n", host)
+	fmt.Printf("\n=== POST %s/setup/prefpane/loginDelegates ===\n", host)
 	fmt.Printf("HTTP %d, %d bytes\n", resp.StatusCode, len(out))
 	fmt.Printf("X-Apple-Request-Debug: %q\n", resp.Header.Get("X-Apple-Request-Debug"))
 	fmt.Printf("X-Responding-Instance: %q\n\n", resp.Header.Get("X-Responding-Instance"))

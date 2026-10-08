@@ -96,8 +96,14 @@ func BeginLogin(creds Credentials, store Store, opts ...Option) (*Login, error) 
 	}
 	l.backend = o.newBackend(l.anisette, gsess)
 	if l.serialNumber != "" {
-		if backend, ok := l.backend.(interface{ EnableNativeDeviceAuthentication() }); ok {
-			backend.EnableNativeDeviceAuthentication()
+		// The iCloud delegate exchange succeeds with the plain akd client
+		// identity and is refused with ICLOUD_INVALID_DEVICE_TOKEN when the
+		// session presents itself as AppleIDSettings, so this stays behind an
+		// escape hatch while the two paths are compared.
+		if os.Getenv("APPLESERVICES_NO_NATIVE_DEVICE_AUTH") == "" {
+			if backend, ok := l.backend.(interface{ EnableNativeDeviceAuthentication() }); ok {
+				backend.EnableNativeDeviceAuthentication()
+			}
 		}
 	}
 	if len(o.pushToken) > 0 {

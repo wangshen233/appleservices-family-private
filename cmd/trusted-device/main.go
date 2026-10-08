@@ -261,7 +261,13 @@ func run() (runErr error) {
 			return err
 		}
 		defer localADI.Close()
-		options = append(options, appleservices.WithAnisette(localADI))
+		// APPLESERVICES_REMOTE_ANISETTE keeps the local module for six-digit
+		// generation while headers come from the configured anisette server.
+		// The two were once the same code path, so this isolates which of them
+		// a delegate refusal is about.
+		if os.Getenv("APPLESERVICES_REMOTE_ANISETTE") == "" {
+			options = append(options, appleservices.WithAnisette(localADI))
+		}
 		fmt.Fprintln(os.Stderr, "Local six-digit generation is available for the same device identity.")
 	}
 	generateCode := func(codeCtx context.Context) (string, error) {
