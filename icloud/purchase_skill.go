@@ -3,6 +3,7 @@ package icloud
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -84,7 +85,25 @@ func skillHTTPTransport() http.RoundTripper {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
+	if os.Getenv("APPLESERVICES_SKILL_REFERENCE_WIRE") == "1" {
+		transport.TLSClientConfig = &tls.Config{
+			MinVersion:       tls.VersionTLS12,
+			CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384, tls.CurveP521},
+		}
+	}
 	return transport
+}
+
+// The successful standalone client used this XML layout and Go 1.21 TLS
+// defaults. Keep this opt-in comparison separate from the standard encoder.
+func skillReferenceLoginBody(appleID, password, guid string) []byte {
+	escape := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	values := [][2]string{{"appleId", appleID}, {"attempt", "1"}, {"guid", guid}, {"password", password}, {"rmp", "0"}, {"why", "signIn"}}
+	items := make([]string, 0, len(values))
+	for _, value := range values {
+		items = append(items, "<key>"+value[0]+"</key><string>"+escape.Replace(value[1])+"</string>")
+	}
+	return []byte("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n" + strings.Join(items, "\n") + "\n</dict></plist>")
 }
 
 // AuthenticateSkillStore follows the repository's icloud-plus-purchase skill.
@@ -108,6 +127,9 @@ func AuthenticateSignedSkillStore(ctx context.Context, appleID, password string,
 	}
 	client := &http.Client{Jar: mustCookieJar(), Transport: skillHTTPTransport(), Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	agent := skillAuthenticationAgent()
+	if os.Getenv("APPLESERVICES_SKILL_MATCHED_BAG") == "1" {
+		agent = storeSAPUserAgent
+	}
 	if appStoreProfile {
 		agent = storeMacUserAgent
 	} else {
@@ -138,8 +160,16 @@ func authenticateSkillStoreClient(ctx context.Context, client *http.Client, guid
 }
 
 func authenticateSkillStoreConfigured(ctx context.Context, client *http.Client, endpoint, guid, appleID, password, agent string, headers map[string]string, signer sap.ActionSigner, codeProvider func() (string, error)) (*StoreCommerceSession, error) {
+	maxAttempts := 20
+	if raw := os.Getenv("APPLESERVICES_SKILL_AUTH_ATTEMPTS"); raw != "" {
+		limit, err := strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 100 {
+			return nil, &StorageError{Stage: "purchase-store-retry-limit"}
+		}
+		maxAttempts = limit
+	}
 	needsCode := false
-	for attempt, redirects := 1, 0; attempt <= 20; attempt++ {
+	for attempt, redirects := 1, 0; attempt <= maxAttempts; attempt++ {
 		code := ""
 		var err error
 		if codeProvider != nil && needsCode {
@@ -151,6 +181,9 @@ func authenticateSkillStoreConfigured(ctx context.Context, client *http.Client, 
 		body, err := plistLoginAttemptBody(appleID, password+code, guid, 1)
 		if err != nil {
 			return nil, &StorageError{Stage: "purchase-store-request"}
+		}
+		if os.Getenv("APPLESERVICES_SKILL_REFERENCE_WIRE") == "1" {
+			body = skillReferenceLoginBody(appleID, password+code, guid)
 		}
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if signer != nil {
@@ -184,6 +217,9 @@ func authenticateSkillStoreConfigured(ctx context.Context, client *http.Client, 
 			return nil, &StorageError{Stage: "purchase-store-response", HTTPStatus: resp.StatusCode}
 		}
 		fmt.Printf("skill Store authentication attempt=%d; HTTP=%d; response-bytes=%d\n", attempt, resp.StatusCode, len(data))
+		if resp.TLS != nil && (attempt == 1 || resp.StatusCode == 200) {
+			fmt.Printf("Store transport: %s; TLS=%x; cipher=%s; verified-chains=%d\n", resp.Proto, resp.TLS.Version, tls.CipherSuiteName(resp.TLS.CipherSuite), len(resp.TLS.VerifiedChains))
+		}
 		if dir := os.Getenv("APPLESERVICES_STORE_AUTH_DIAGNOSTIC_DIR"); dir != "" {
 			f, err := os.CreateTemp(dir, "skill-store-auth-*.json")
 			if err != nil {
@@ -239,7 +275,7 @@ func authenticateSkillStoreConfigured(ctx context.Context, client *http.Client, 
 			client.CloseIdleConnections()
 			return nil, &StorageError{Stage: "purchase-store-authentication", HTTPStatus: resp.StatusCode}
 		}
-		if attempt == 20 {
+		if attempt == maxAttempts {
 			client.CloseIdleConnections()
 			return nil, &StorageError{Stage: "purchase-store-authentication", HTTPStatus: resp.StatusCode}
 		}
@@ -418,7 +454,11 @@ func (s *StoreCommerceSession) SubmitSkillPurchase(ctx context.Context, info *St
 	}
 	if dialog, ok := r["dialog"].(map[string]any); ok {
 		action, _ := dialog["okButtonAction"].(map[string]any)
-		if dialog["dialogId"] != "SRVOrderManager.ConfirmBuyingAutoRenewingSubscription" || action["kind"] != "Buy" {
+		fmt.Printf("Apple purchase dialog: id=%s; action=%s\n", safePurchaseField(dialog["dialogId"]), safePurchaseField(action["kind"]))
+		// Some Store pods omit dialogId while retaining the authoritative Buy
+		// action and Apple-issued buyParams. The action is the confirmation
+		// contract; require it and validate the parameters below.
+		if action["kind"] != "Buy" {
 			return &PurchaseResult{State: "confirmation-required", HTTPStatus: 200}, nil
 		}
 		params, _ := action["buyParams"].(string)
@@ -442,6 +482,14 @@ func (s *StoreCommerceSession) SubmitSkillPurchase(ctx context.Context, info *St
 		return &PurchaseResult{State: "completed", HTTPStatus: 200}, nil
 	}
 	return &PurchaseResult{State: "verification-pending", HTTPStatus: 200}, nil
+}
+
+func safePurchaseField(v any) string {
+	s := fmt.Sprint(v)
+	if len(s) > 96 {
+		return s[:96]
+	}
+	return s
 }
 
 func findSkillValue(v any, key string) any {

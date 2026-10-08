@@ -29,11 +29,19 @@ func run() error {
 	localStoreCode := flag.Bool("local-store-code", false, "generate a code on this account's existing trusted Mac; never request SMS")
 	storeRetries := flag.Int("store-auth-retries", 0, "at most 3 routing-error retries during Store authentication; never retry a purchase")
 	signedStore := flag.Bool("signed-store", false, "SAP-sign native Store authentication; claude-skill uses the physical Store GUID")
+	matchedBag := flag.Bool("matched-bag", false, "diagnose the SAP endpoint and setup pair returned for the same Store bag")
 	appStoreProfile := flag.Bool("appstore-profile", false, "diagnose signed App Store authentication using the Apple bag endpoint and account headers")
 	claudeSkill := flag.Bool("claude-skill", false, "follow .claude icloud-plus-purchase with physical Store GUID and native plist flow")
 	storeSessionOut := flag.String("store-session-out", "", "new owner-only output retaining this account's Store credentials and cookies")
 	storeSessionIn := flag.String("store-session-in", "", "private Store session for this account and physical GUID")
+	storeCodeFile := flag.String("store-code-file", "", "owner-only file containing the latest live device code; reread on each challenged request")
 	flag.Parse()
+	if *matchedBag {
+		if !*claudeSkill || !*signedStore || *appStoreProfile {
+			return fmt.Errorf("matched-bag requires claude-skill and signed-store without appstore-profile")
+		}
+		os.Setenv("APPLESERVICES_SKILL_MATCHED_BAG", "1")
+	}
 	if *claudeSkill && !*nativeStore {
 		return fmt.Errorf("claude-skill requires native-store")
 	}
@@ -54,6 +62,12 @@ func run() error {
 	os.Unsetenv("APPLESERVICES_APPLEID")
 	os.Unsetenv("APPLESERVICES_PASSWORD")
 	os.Unsetenv("APPLESERVICES_STORE_CODE")
+	if *storeCodeFile != "" {
+		if !*claudeSkill || *localStoreCode || storeCode != "" || *storeSessionIn != "" {
+			return fmt.Errorf("live code file requires purchase skill and cannot combine with another code source or Store resume")
+		}
+		defer os.Remove(*storeCodeFile)
+	}
 	if *localStoreCode && (!*nativeStore && !*storeCheck || storeCode != "") {
 		return fmt.Errorf("local-store-code requires native Store mode and cannot combine with a supplied code")
 	}
@@ -97,7 +111,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	attemptTimeout := 3 * time.Minute
+	if *storeCodeFile != "" {
+		attemptTimeout = 5 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
 	defer cancel()
 	if err := native.Start(ctx); err != nil {
 		return err
@@ -158,6 +176,29 @@ func run() error {
 				provider = func() (string, error) { return native.Code(ctx) }
 			} else if storeCode != "" {
 				provider = func() (string, error) { return storeCode, nil }
+			} else if *storeCodeFile != "" {
+				provider = func() (string, error) {
+					announced := false
+					for {
+						info, err := os.Stat(*storeCodeFile)
+						if err == nil && info.Size() <= 16 && time.Since(info.ModTime()) <= 90*time.Second {
+							data, err := os.ReadFile(*storeCodeFile)
+							return strings.TrimSpace(string(data)), err
+						}
+						if err != nil && !os.IsNotExist(err) {
+							return "", fmt.Errorf("cannot read private live code file")
+						}
+						if !announced {
+							fmt.Println("Store challenge retained; awaiting a fresh owner-provided device code")
+							announced = true
+						}
+						select {
+						case <-ctx.Done():
+							return "", fmt.Errorf("live Store code wait expired")
+						case <-time.After(250 * time.Millisecond):
+						}
+					}
+				}
 			}
 			if *signedStore || *appStoreProfile {
 				fmt.Println("signed current-bag Store authentication; physical GUID; same cookie jar")
