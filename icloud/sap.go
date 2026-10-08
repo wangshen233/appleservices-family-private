@@ -43,13 +43,17 @@ type storeSAPBag struct {
 // loadStoreSAPBag reads Apple's versioned Store bag. The ix=6 response is a
 // plain plist and carries the SAP endpoints used by the current Store login.
 func loadStoreSAPBag(ctx context.Context, client *http.Client, guid string) (storeSAPBag, error) {
+	return loadStoreSAPBagForAgent(ctx, client, guid, storeSAPUserAgent, false)
+}
+
+func loadStoreSAPBagForAgent(ctx context.Context, client *http.Client, guid, agent string, preserveNative bool) (storeSAPBag, error) {
 	query := url.Values{"ix": {"6"}, "guid": {guid}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, storeBagURL+"?"+query.Encode(), nil)
 	if err != nil {
 		return storeSAPBag{}, err
 	}
 	req.Header.Set("Accept", "application/xml, text/xml, */*")
-	req.Header.Set("User-Agent", storeSAPUserAgent)
+	req.Header.Set("User-Agent", agent)
 	resp, err := client.Do(req)
 	if err != nil {
 		return storeSAPBag{}, fmt.Errorf("fetch Store bag: %w", err)
@@ -65,6 +69,21 @@ func loadStoreSAPBag(ctx context.Context, client *http.Client, guid string) (sto
 	bag, err := decodeStoreSAPBag(body)
 	if err != nil {
 		return storeSAPBag{}, err
+	}
+	if preserveNative {
+		var values map[string]any
+		if _, err := plist.Unmarshal(body, &values); err != nil {
+			return storeSAPBag{}, err
+		}
+		raw := plistString(values, "authenticateAccount")
+		if err := validateSAPEndpoint("authenticate", raw); err != nil {
+			return storeSAPBag{}, err
+		}
+		u, _ := url.Parse(raw)
+		if u.Hostname() != "auth.itunes.apple.com" || (u.Path != "/auth/v1/native" && u.Path != "/auth/v1/native/fast" && u.Path != "/auth/v1/native/fast/") {
+			return storeSAPBag{}, errors.New("bag did not return a supported native Store endpoint")
+		}
+		bag.AuthEndpoint = raw
 	}
 	return bag, nil
 }
@@ -410,6 +429,22 @@ func AuthenticateStoreForHardware(ctx context.Context, appleID, password, code s
 // retry of HTTP routing failures during authentication only. It never purchases
 // or retries an application rejection or an HTTP 429.
 func AuthenticateStoreForHardwareWithRetries(ctx context.Context, appleID, password, code string, headers map[string]string, hardware []byte, retries int) (*StoreCommerceSession, error) {
+	return authenticateStoreForHardwareMode(ctx, appleID, password, code, headers, hardware, retries, false, false)
+}
+
+// AuthenticateSignedStoreForHardware signs the native authentication body
+// according to Apple's sign-sap-request bag while keeping the account Mac.
+func AuthenticateSignedStoreForHardware(ctx context.Context, appleID, password, code string, headers map[string]string, hardware []byte, retries int) (*StoreCommerceSession, error) {
+	return authenticateStoreForHardwareMode(ctx, appleID, password, code, headers, hardware, retries, true, false)
+}
+
+// AuthenticateAppStoreForHardware uses Apple's bag endpoint verbatim, the
+// account Mac's anisette headers, and the native App Store fingerprint.
+func AuthenticateAppStoreForHardware(ctx context.Context, appleID, password, code string, headers map[string]string, hardware []byte, retries int) (*StoreCommerceSession, error) {
+	return authenticateStoreForHardwareMode(ctx, appleID, password, code, headers, hardware, retries, true, true)
+}
+
+func authenticateStoreForHardwareMode(ctx context.Context, appleID, password, code string, headers map[string]string, hardware []byte, retries int, nativeSignature, appStoreProfile bool) (*StoreCommerceSession, error) {
 	if retries < 0 || retries > 3 {
 		return nil, &StorageError{Stage: "purchase-store-retry-limit"}
 	}
@@ -418,13 +453,27 @@ func AuthenticateStoreForHardwareWithRetries(ctx context.Context, appleID, passw
 	}
 	guid := strings.ToUpper(fmt.Sprintf("%x", hardware))
 	client := &http.Client{Jar: mustCookieJar(), Transport: storeProxyTransport(), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	bag, err := loadStoreSAPBag(ctx, client, guid)
+	var bag storeSAPBag
+	var err error
+	if appStoreProfile {
+		bag, err = loadStoreSAPBagForAgent(ctx, client, guid, storeMacUserAgent, true)
+	} else {
+		bag, err = loadStoreSAPBag(ctx, client, guid)
+	}
 	if err != nil {
 		client.CloseIdleConnections()
 		return nil, &StorageError{Stage: "purchase-store-bag"}
 	}
-	// The current native endpoint does not use a SAP action signature.
-	identity, err := authenticateSignedStoreBounded(ctx, client, bag.AuthEndpoint, appleID, password, code, guid, headers, nil, retries)
+	var signer sap.ActionSigner
+	if nativeSignature {
+		signer, err = sap.NewSigner(ctx, sap.Config{SetupURL: bag.SetupURL, CertificateURL: bag.CertificateURL, Version: bag.Version, HardwareID: hardware})
+		if err != nil {
+			client.CloseIdleConnections()
+			return nil, &StorageError{Stage: "purchase-store-sap"}
+		}
+		defer signer.Close()
+	}
+	identity, err := authenticateSignedStoreConfigured(ctx, client, bag.AuthEndpoint, appleID, password, code, guid, headers, signer, retries, nativeSignature, appStoreProfile)
 	if err != nil {
 		client.CloseIdleConnections()
 		return nil, err
@@ -538,6 +587,10 @@ func authenticateSignedStore(ctx context.Context, client *http.Client, endpoint,
 }
 
 func authenticateSignedStoreBounded(ctx context.Context, client *http.Client, endpoint, appleID, password, code, guid string, headers map[string]string, signer sap.ActionSigner, retryLimit int) (*storeSession, error) {
+	return authenticateSignedStoreConfigured(ctx, client, endpoint, appleID, password, code, guid, headers, signer, retryLimit, false, false)
+}
+
+func authenticateSignedStoreConfigured(ctx context.Context, client *http.Client, endpoint, appleID, password, code, guid string, headers map[string]string, signer sap.ActionSigner, retryLimit int, nativeSignature, appStoreProfile bool) (*storeSession, error) {
 	if code != "" && (len(code) != 6 || strings.IndexFunc(code, func(r rune) bool { return r < '0' || r > '9' }) != -1) {
 		return nil, &StorageError{Stage: "purchase-store-code"}
 	}
@@ -552,7 +605,7 @@ func authenticateSignedStoreBounded(ctx context.Context, client *http.Client, en
 			return nil, &StorageError{Stage: "purchase-store-sap"}
 		}
 		signatureHeader := ""
-		if !modernAuth {
+		if !modernAuth || nativeSignature {
 			if signer == nil {
 				return nil, &StorageError{Stage: "purchase-store-sap"}
 			}
@@ -582,6 +635,17 @@ func authenticateSignedStoreBounded(ctx context.Context, client *http.Client, en
 			if signatureHeader != "" {
 				req.Header.Set("X-Apple-ActionSignature", signatureHeader)
 			}
+		}
+		if modernAuth && nativeSignature {
+			req.Header.Set("X-Apple-ActionSignature", signatureHeader)
+		}
+		if appStoreProfile {
+			for key, value := range headers {
+				req.Header.Set(key, value)
+			}
+			req.Header.Set("User-Agent", storeMacUserAgent)
+			req.Header.Set("Accept", "application/x-apple-plist, application/xml")
+			req.Header.Set("X-Apple-ActionSignature", signatureHeader)
 		}
 		resp, doErr := client.Do(req)
 		if doErr != nil {

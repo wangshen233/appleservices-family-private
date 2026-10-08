@@ -28,6 +28,8 @@ func run() error {
 	nativeStore := flag.Bool("native-store", false, "use this account Mac's authenticated native Store and exact returned confirmation")
 	localStoreCode := flag.Bool("local-store-code", false, "generate a code on this account's existing trusted Mac; never request SMS")
 	storeRetries := flag.Int("store-auth-retries", 0, "at most 3 routing-error retries during Store authentication; never retry a purchase")
+	signedStore := flag.Bool("signed-store", false, "SAP-sign this Mac's native Store authentication")
+	appStoreProfile := flag.Bool("appstore-profile", false, "use the exact Apple bag endpoint and account Mac App Store headers with SAP")
 	flag.Parse()
 	if *storeRetries < 0 || *storeRetries > 3 {
 		return fmt.Errorf("Store authentication retries must be between 0 and 3")
@@ -138,7 +140,15 @@ func run() error {
 			}
 			fmt.Println("same-account local Mac code generated in memory; no SMS requested")
 		}
-		commerce, err = icloud.AuthenticateStoreForHardwareWithRetries(ctx, username, password, storeCode, headers, nativeadi.SyntheticMACAddress(device.Identifier), *storeRetries)
+		if *appStoreProfile {
+			fmt.Println("native App Store profile; signed exact Apple bag endpoint; account Mac retained")
+			commerce, err = icloud.AuthenticateAppStoreForHardware(ctx, username, password, storeCode, headers, nativeadi.SyntheticMACAddress(device.Identifier), *storeRetries)
+		} else if *signedStore {
+			fmt.Println("native Store SAP signature enabled; account Mac hardware retained")
+			commerce, err = icloud.AuthenticateSignedStoreForHardware(ctx, username, password, storeCode, headers, nativeadi.SyntheticMACAddress(device.Identifier), *storeRetries)
+		} else {
+			commerce, err = icloud.AuthenticateStoreForHardwareWithRetries(ctx, username, password, storeCode, headers, nativeadi.SyntheticMACAddress(device.Identifier), *storeRetries)
+		}
 		storeCode = ""
 		status := map[string]any{"stage": "store-authentication", "purchase-submitted": false, "store-ready": err == nil && commerce.MatchesAccount(accepted.Session.DSID)}
 		if err != nil {
