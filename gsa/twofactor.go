@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/Laky-64/http"
@@ -19,12 +20,12 @@ func (c *Client) twoFactorHeaders(dsid, idmsToken string) (map[string]string, er
 		return nil, err
 	}
 	identityToken := base64.StdEncoding.EncodeToString([]byte(dsid + ":" + idmsToken))
+	// Only the identity token and the anisette headers are sent. Naming an Xcode
+	// client here makes Apple answer the verification-code page with 423 Locked,
+	// and a client that completes this exchange leaves the agent unset too.
 	headers := map[string]string{
-		"User-Agent":             "Xcode",
 		"Accept-Language":        "en-us",
 		"X-Apple-Identity-Token": identityToken,
-		"X-Apple-App-Info":       "com.apple.gs.xcode.auth",
-		"X-Xcode-Version":        "11.2 (11B41)",
 	}
 	for k, v := range anisetteHeaders {
 		headers[k] = v
@@ -145,6 +146,16 @@ func (c *Client) fetchTrustedPhoneID(dsid, idmsToken string) (int, error) {
 		return 0, fmt.Errorf("gsa: fetch boot_args page: %w", err)
 	}
 	if result.StatusCode != 200 && result.StatusCode != 201 {
+		// The body states why the page was refused (a lockout window, a pending
+		// verification, an unsupported account state), and discarding it leaves
+		// only the status to guess from.
+		detail := strings.TrimSpace(string(result.Body))
+		if len(detail) > 200 {
+			detail = detail[:200]
+		}
+		if detail != "" {
+			return 0, fmt.Errorf("gsa: fetch boot_args page: status %d: %s", result.StatusCode, detail)
+		}
 		return 0, fmt.Errorf("gsa: fetch boot_args page: status %d", result.StatusCode)
 	}
 	c.smsCodeAlreadySent = result.StatusCode == 201

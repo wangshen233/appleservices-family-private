@@ -1,9 +1,9 @@
 // Command v2login calls Apple's v2 sign-in endpoint, the one a working client
-// uses to obtain delegates, and prints the unmodified response.
+// uses to obtain iCloud delegates.
 //
-// The project's delegate path posts to /setup/iosbuddy/loginDelegates, which
-// answers a refusal with a generic "server problem" message. The v2 endpoint
-// takes a different request shape and reports the reason instead.
+// The project posts to /setup/iosbuddy/loginDelegates, which answers a refusal
+// with a generic "server problem" message and no reason. The v2 endpoint takes a
+// different request shape and reports localizedError and description instead.
 package main
 
 import (
@@ -26,11 +26,6 @@ type session struct {
 	Tokens  map[string]string `json:"Tokens"`
 }
 
-type device struct {
-	Identifier   []byte
-	SerialNumber string
-}
-
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("usage: v2login <state-dir>")
@@ -47,18 +42,15 @@ func main() {
 		fmt.Println("decode:", err)
 		os.Exit(1)
 	}
-	devData, _ := os.ReadFile(filepath.Join(dir, "device.json"))
-	var d device
-	_ = json.Unmarshal(devData, &d)
 
 	pet := s.Tokens["com.apple.gs.idms.pet"]
 	body := map[string]any{
 		"delegates":        map[string]any{"com.apple.mobileme": map[string]any{}},
 		"protocol_version": "1.0",
 		"user_info": map[string]any{
-			"client_id": "00000000-0000-0000-0000-000000000001",
+			"client-id": "00000000-0000-0000-0000-000000000001",
 			"language":  "en-US",
-			"timezone":  "UTC",
+			"timezone":  "America/New_York",
 		},
 	}
 	var buf bytes.Buffer
@@ -70,8 +62,11 @@ func main() {
 	req, _ := http.NewRequest("POST", "https://setup.icloud.com/setup/signin/v2/login", bytes.NewReader(buf.Bytes()))
 	req.Header.Set("Content-Type", "text/plist")
 	req.Header.Set("Accept-Encoding", "gzip")
+	// The delegate exchange identifies as the iCloud helper running under
+	// accountsd, not as the anisette provider's client.
+	req.Header.Set("User-Agent", "com.apple.iCloudHelper/282 CFNetwork/1408.0.4 Darwin/22.5.0")
+	req.Header.Set("X-Mme-Client-Info", "<MacBookPro18,3> <macOS;13.4.1;22F8> <com.apple.AOSKit/282 (com.apple.accountsd/113)>")
 	req.Header.Set("X-Apple-ADSID", s.DSID)
-	req.Header.Set("X-Mme-Client-Info", "<MacBookPro15,1> <macOS;13.1;22C65> <com.apple.AOSKit/282>")
 	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(s.AppleID+":"+pet)))
 
 	fmt.Printf("POST https://setup.icloud.com/setup/signin/v2/login\n")

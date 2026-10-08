@@ -1,9 +1,15 @@
 package gsa
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"net"
 	"net/http"
+	"os"
+	"strings"
+
+	"golang.org/x/net/proxy"
 )
 
 func AppleRootTransport() http.RoundTripper {
@@ -20,7 +26,32 @@ func AppleRootTransport() http.RoundTripper {
 		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
 	}
 	transport.TLSClientConfig.RootCAs = pool
+	applySOCKS5Proxy(transport)
 	return transport
+}
+
+// applySOCKS5Proxy routes this transport through a SOCKS5 proxy named by
+// APPLESERVICES_SOCKS_PROXY. Apple throttles the verification-code page by
+// egress address, and Go's environment proxy support covers HTTP proxies only,
+// so a SOCKS5 listener needs its own dialer.
+func applySOCKS5Proxy(transport *http.Transport) {
+	raw := strings.TrimSpace(os.Getenv("APPLESERVICES_SOCKS_PROXY"))
+	if raw == "" {
+		return
+	}
+	dialer, err := proxy.SOCKS5("tcp", raw, nil, proxy.Direct)
+	if err != nil {
+		return
+	}
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if cd, ok := dialer.(interface {
+			DialContext(context.Context, string, string) (net.Conn, error)
+		}); ok {
+			return cd.DialContext(ctx, network, addr)
+		}
+		return dialer.Dial(network, addr)
+	}
 }
 
 const AppleRootCAPEM = `-----BEGIN CERTIFICATE-----

@@ -21,11 +21,11 @@ type fileStore struct {
 	sess   *appleservices.Session
 }
 
-func (f fileStore) LoadDevice() (*appleservices.Device, error)              { return f.device, nil }
-func (f fileStore) SaveDevice(*appleservices.Device) error                  { return nil }
-func (f fileStore) LoadSession() (*appleservices.Session, error)            { return f.sess, nil }
-func (f fileStore) SaveSession(*appleservices.Session) error                { return nil }
-func (f fileStore) Path() string                                           { return f.dir }
+func (f fileStore) LoadDevice() (*appleservices.Device, error)   { return f.device, nil }
+func (f fileStore) SaveDevice(*appleservices.Device) error       { return nil }
+func (f fileStore) LoadSession() (*appleservices.Session, error) { return f.sess, nil }
+func (f fileStore) SaveSession(*appleservices.Session) error     { return nil }
+func (f fileStore) Path() string                                 { return f.dir }
 
 func load(dir string) (fileStore, error) {
 	s := fileStore{dir: dir}

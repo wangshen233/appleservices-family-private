@@ -38,6 +38,15 @@ type DelegateTokens struct {
 
 func FetchDelegateTokens(anisetteHeaders map[string]string, username, adsid, pet string) (DelegateTokens, error) {
 	anisetteHeaders = httpx.NormalizeAnisetteHeaders(anisetteHeaders)
+
+	// The iosbuddy path takes the Apple ID and PET in the body and answers a
+	// refusal with a generic message. The v2 sign-in path, which a working
+	// client uses, takes a delegates/protocol_version/user_info document and
+	// reports localizedError and description instead.
+	if strings.TrimSpace(os.Getenv("APPLESERVICES_DELEGATE_V2")) != "" {
+		return fetchDelegateTokensV2(anisetteHeaders, username, adsid, pet)
+	}
+
 	body := map[string]any{
 		"apple-id":  username,
 		"delegates": map[string]any{"com.apple.mobileme": map[string]any{}},
@@ -52,7 +61,6 @@ func FetchDelegateTokens(anisetteHeaders map[string]string, username, adsid, pet
 	headers := map[string]string{
 		"Content-Type":      "text/plist",
 		"X-Apple-ADSID":     adsid,
-		"Cookie":            "termsAccepted=true",
 		"User-Agent":        "com.apple.iCloudHelper/282 CFNetwork/1408.0.4 Darwin/22.5.0",
 		"X-Mme-Client-Info": "<MacBookPro18,3> <Mac OS X;13.4.1;22F8> <com.apple.AOSKit/282 (com.apple.accountsd/113)>",
 		"Authorization":     httpx.BasicAuth(username, pet),
@@ -83,6 +91,67 @@ func FetchDelegateTokens(anisetteHeaders map[string]string, username, adsid, pet
 		// per-delegate status does not carry. Keep the raw plist so a failure
 		// stays diagnosable instead of collapsing into "status 1".
 		_ = os.WriteFile(path, result.Body, 0o600)
+	}
+	return extractDelegateTokens(decoded, adsid)
+}
+
+// fetchDelegateTokensV2 posts the delegate request to Apple's v2 sign-in
+// endpoint. The request shape and headers follow a client that completes this
+// exchange: a delegates/protocol_version/user_info document, the iCloud helper
+// agent under accountsd, and Basic authentication with the account's PET.
+func fetchDelegateTokensV2(anisetteHeaders map[string]string, username, adsid, pet string) (DelegateTokens, error) {
+	body := map[string]any{
+		"delegates":        map[string]any{"com.apple.mobileme": map[string]any{}},
+		"protocol_version": "1.0",
+		"user_info": map[string]any{
+			// The user-info keys are kebab-case in the reference client while
+			// the two outer keys are not.
+			"client-id": uuid.New(),
+			"language":  "en-US",
+			"timezone":  "America/New_York",
+		},
+	}
+	var buf bytes.Buffer
+	if err := plist.NewEncoder(&buf).Encode(body); err != nil {
+		return DelegateTokens{}, fmt.Errorf("icloud: encode v2 login body: %w", err)
+	}
+
+	headers := map[string]string{
+		"Content-Type":      "text/plist",
+		"Accept-Encoding":   "gzip",
+		"User-Agent":        "com.apple.iCloudHelper/282 CFNetwork/1408.0.4 Darwin/22.5.0",
+		"X-Mme-Client-Info": "<MacBookPro18,3> <macOS;13.4.1;22F8> <com.apple.AOSKit/282 (com.apple.accountsd/113)>",
+		"X-Apple-ADSID":     adsid,
+		"Authorization":     httpx.BasicAuth(username, pet),
+	}
+	for k, v := range anisetteHeaders {
+		if strings.EqualFold(k, "X-Mme-Client-Info") || strings.EqualFold(k, "User-Agent") {
+			continue
+		}
+		headers[k] = v
+	}
+
+	result, err := http.ExecuteRequest(setupBaseFor(username)+"/setup/signin/v2/login",
+		http.Method("POST"),
+		http.Body(buf.Bytes()),
+		http.Headers(headers),
+		http.Timeout(30*time.Second),
+	)
+	if result != nil {
+		if path := strings.TrimSpace(os.Getenv("APPLESERVICES_DELEGATE_DUMP")); path != "" {
+			_ = os.WriteFile(path, result.Body, 0o600)
+		}
+	}
+	if err != nil {
+		return DelegateTokens{}, fmt.Errorf("icloud: v2 login request: %w", err)
+	}
+	if result.StatusCode != 200 {
+		return DelegateTokens{}, fmt.Errorf("icloud: v2 login status %d", result.StatusCode)
+	}
+
+	var decoded map[string]any
+	if _, err := plist.Unmarshal(result.Body, &decoded); err != nil {
+		return DelegateTokens{}, fmt.Errorf("icloud: decode v2 login response: %w", err)
 	}
 	return extractDelegateTokens(decoded, adsid)
 }
