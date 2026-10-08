@@ -2,7 +2,18 @@
 
 **复核日期**：2026-10-08
 **目标**：让用户指定账号通过 iCloud 登录，取得 `mmeAuthToken`，并用该令牌读到配额。
-**状态**：`02-account` 的独立 Mac v2/NAC 路径已完成验证；当前目标 `01-account` 尚未激活。`02-account` 在 Windows 上运行公开 OpenAbsinthe/pypush 风格 NAC 仿真，生成 517 字节验证数据；其 v2 delegate 返回有效 `mmeAuthToken` 和 `cloudKitToken`，随后配额读取成功（总容量 5 GiB、已用 0、付费容量 0）。这些证据不能转用于 `01-account`。
+**状态**：`02-account` 和最新目标 `03-account` 的独立 Mac v2/NAC 路径均已通过 MME 与配额验收。`01-account`、`01-primary` 仍未完成 2FA。各账号使用独立诊断 Mac 和 APS，不转用其他账号的成功证据。`03-account` 后续新 GSA 登录的 delegate 返回 3001，但首次接受的 MME 会话仍能实时读取配额及套餐；不能将首次成功概括为所有新登录或 worker 都已修复。
+
+### 最新目标 03-account：设备验证、条款、激活与套餐
+
+- 手机不可用后停止短信路径，改为向账号现有受信任设备申请验证码。用户提供设备码，Apple 接受，完成本账号新 GSA 认证；验证码用后删除。
+- 使用本账号独立 UUID、序列号、网络地址、ADI 与真实 Mac APS 证书/令牌。缺失板级字段采用明确标记的合成诊断值；没有使用另一个账号或实体 Mac 的身份。
+- Apple 返回 CN 条款（iCloud 634301、媒体服务 290399）。取得本账号用户明确授权后提交一次，返回 HTTP 200、`success=true` 及接受条款响应头。
+- 条款后的 delegate 与配额成功；另用本账号 517 字节 NAC 验证 Mac v2 delegate，同样取得非空 MME，读到总容量 5 GiB、已用 0、付费容量 0。accepted checkpoint 仅在配额成功后写入私有目录。
+- 用同一模拟 Mac 新登录后，GET 查询当前设备详情，`trustedDevice=true`，序列号匹配，`pushDevice=false`；设备摘要为 `supportsVerificationCodes=false`。信任已验证，不能因此推断该 Mac 可生成有效设备验证码或已实测接收验证推送。
+- 旧 GSA checkpoint 的设备查询及稍后的 v2 重用返回 401；新 GSA 登录后的 v2 返回 `HTTP 409 / ICLOUD_UNSUPPORTED_DEVICE / 3001`。保留这些失败，不自动重提条款，不据此否定首次已通过的令牌与配额验收，也不宣称新的 delegate 路径稳定。
+- 随后直接复用首次 accepted MME checkpoint，实时配额再次成功。GET-only 套餐查询返回可用 CN 月付方案：50 GB / CNY 600 分、200 GB / 2100 分、2 TB / 6800 分、6 TB / 19800 分、12 TB / 39800 分。没有提交购买、支付或购买表单；套餐可用不证明实际付款可成功。
+- 新 CLI 模式：`-trusted-device-code -sms-code-file <新私有文件>` 申请并验证设备码；它与短信/本地码模式互斥。`-icloud-resume <accepted checkpoint> [-storage-plan]` 使用已接受的本账号 MME，只读配额及可选套餐，不再做 GSA、delegate、条款或购买。
 
 ### 当前目标 01-account 的最新直连复测
 

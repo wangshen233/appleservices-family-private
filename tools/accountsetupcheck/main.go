@@ -41,6 +41,20 @@ func writePrivateFile(path string, data []byte) error {
 	return nil
 }
 
+func readStorageOffers(ctx context.Context, username, dsid, adsid, token, storageToken string, headers map[string]string) error {
+	// GET-only offer lookup. No authentication form or purchase is submitted.
+	plans, err := icloud.FetchStorefrontPlanInfoWithStorageToken(ctx, username, dsid, adsid, token, storageToken, headers)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(plans)
+	if err != nil {
+		return fmt.Errorf("cannot summarize storage offers")
+	}
+	fmt.Printf("read-only storage offers; purchase-submitted=false; %s\n", encoded)
+	return nil
+}
+
 func run() error {
 	dir := flag.String("dir", "", "account state directory")
 	nativeProfile := flag.String("native-profile", "", "explicit isolated native profile for the same bound device; default is account native-adi")
@@ -51,21 +65,24 @@ func run() error {
 	accept := flag.Bool("accept-terms", false, "submit the terms update only after the account owner explicitly agrees")
 	expectedTerms := flag.String("expected-terms", "", "approved region:icloud-version:media-version, required for acceptance")
 	resume := flag.String("resume", "", "reuse a private bound GSA checkpoint without another password request")
+	icloudResume := flag.String("icloud-resume", "", "read quota and optional offers using a bound accepted iCloud checkpoint; no login or delegate exchange")
 	freshGSA := flag.Bool("fresh-gsa", false, "ignore stored GSA cookies while keeping this account's device identity")
-	codeFile := flag.String("sms-code-file", "", "new private file to receive an SMS code for this live challenge")
+	codeFile := flag.String("sms-code-file", "", "new private file to receive this live SMS or trusted-device code")
 	phoneID := flag.Int("sms-phone-id", 0, "explicit trusted phone diagnostic; zero fetches metadata")
 	requestSMSOnly := flag.Bool("request-sms-only", false, "request an SMS for this account and exit before verification")
 	smsAlreadySent := flag.Bool("sms-already-sent", false, "submit a previously requested, still-valid SMS without requesting another")
 	localTrustedCode := flag.Bool("local-trusted-code", false, "generate and submit a code from this account directory's local device")
+	trustedDeviceCode := flag.Bool("trusted-device-code", false, "request a code on existing trusted devices; never request SMS")
 	delegateOnly := flag.Bool("delegate-only", false, "fresh authentication and one exchange; skip account UI and terms writes")
+	storagePlan := flag.Bool("storage-plan", false, "read storage offers after delegate and quota success; never submit a purchase")
 	nacValidation := flag.String("nac-validation", "", "private Mac NAC validation bytes for this profile")
 	termsAccepted := flag.Bool("terms-accepted", false, "add the reference cookie after this account's verified terms success")
 	icloudCheckpoint := flag.String("icloud-checkpoint", "", "private accepted iCloud session output; separate from live dashboard session")
 	flag.Parse()
-	if *dir == "" || (*dump == "" && !*nativeOnly) {
+	if *dir == "" || (*dump == "" && !*nativeOnly && *icloudResume == "") {
 		return fmt.Errorf("dir and private dump are required")
 	}
-	if *devicesOnly && (*nativeOnly || *accept || *delegateOnly || *requestSMSOnly || *localTrustedCode || *smsAlreadySent || *codeFile != "") {
+	if *devicesOnly && (*nativeOnly || *accept || *delegateOnly || *requestSMSOnly || *localTrustedCode || *trustedDeviceCode || *smsAlreadySent || *codeFile != "") {
 		return fmt.Errorf("devices-only cannot perform registration, second-factor requests or account writes")
 	}
 	for _, path := range []string{*dump, *checkpoint, *icloudCheckpoint} {
@@ -78,14 +95,23 @@ func run() error {
 	if *delegateOnly && *accept {
 		return fmt.Errorf("delegate-only cannot accept terms")
 	}
+	if *storagePlan && !*delegateOnly && *icloudResume == "" {
+		return fmt.Errorf("storage-plan requires delegate-only or icloud-resume diagnostics")
+	}
+	if *icloudResume != "" && (*resume != "" || *nativeOnly || *devicesOnly || *accept || *delegateOnly || *freshGSA || *requestSMSOnly || *smsAlreadySent || *localTrustedCode || *trustedDeviceCode || *phoneID != 0 || *codeFile != "" || *termsAccepted || *nacValidation != "" || *checkpoint != "" || *icloudCheckpoint != "") {
+		return fmt.Errorf("icloud-resume cannot log in, exchange delegates or perform account writes")
+	}
 	if *nacValidation != "" && !*delegateOnly {
 		return fmt.Errorf("NAC validation is only supported by delegate-only diagnostics")
 	}
 	if (*requestSMSOnly && *smsAlreadySent) || (*localTrustedCode && (*requestSMSOnly || *smsAlreadySent)) {
 		return fmt.Errorf("SMS and local trusted-code modes are mutually exclusive")
 	}
+	if *trustedDeviceCode && (*requestSMSOnly || *smsAlreadySent || *localTrustedCode || *phoneID != 0) {
+		return fmt.Errorf("trusted-device delivery cannot be combined with SMS or local-code modes")
+	}
 	username, password := os.Getenv("APPLESERVICES_APPLEID"), os.Getenv("APPLESERVICES_PASSWORD")
-	if username == "" || (password == "" && *resume == "" && !*nativeOnly) {
+	if username == "" || (password == "" && *resume == "" && *icloudResume == "" && !*nativeOnly) {
 		return fmt.Errorf("account identifier is required; new login also requires a password through environment")
 	}
 	var device appleservices.Device
@@ -146,6 +172,31 @@ func run() error {
 			return err
 		}
 		fmt.Printf("native ADI ready; bound-device=true; MD-bytes=%d; MID-bytes=%d; account authentication untested\n", len(headers["X-Apple-I-MD"]), len(headers["X-Apple-I-MD-M"]))
+		return nil
+	}
+	if *icloudResume != "" {
+		var accepted struct {
+			Session     appleservices.Session `json:"session"`
+			ADSID       string                `json:"adsid"`
+			ServiceData map[string]any        `json:"service-data"`
+		}
+		data, err := os.ReadFile(*icloudResume)
+		if err != nil || json.Unmarshal(data, &accepted) != nil || !strings.EqualFold(accepted.Session.AppleID, username) || accepted.ADSID != saved.DSID || accepted.Session.DSID == "" || accepted.Session.Tokens["mmeAuthToken"] == "" {
+			return fmt.Errorf("accepted iCloud checkpoint account binding failed")
+		}
+		headers, err := native.Headers()
+		if err != nil {
+			return err
+		}
+		token := accepted.Session.Tokens["mmeAuthToken"]
+		quota, err := icloud.FetchStorageInfo(ctx, accepted.ServiceData, username, accepted.Session.DSID, accepted.ADSID, token, headers)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("accepted checkpoint quota read; total-bytes=%d; used-bytes=%d; paid-bytes=%d\n", quota.TotalBytes, quota.UsedBytes, quota.PaidBytes)
+		if *storagePlan {
+			return readStorageOffers(ctx, username, accepted.Session.DSID, accepted.ADSID, token, saved.Tokens["com.apple.gs.icloud.storage.buy"], headers)
+		}
 		return nil
 	}
 	var headersProvider gsa.AnisetteProvider = native
@@ -225,7 +276,9 @@ func run() error {
 			}
 			if !*smsAlreadySent {
 				var requestErr error
-				if *phoneID > 0 {
+				if *trustedDeviceCode {
+					requestErr = client.RequestTrustedDeviceCode(adsid, idms)
+				} else if *phoneID > 0 {
 					requestErr = client.RequestSMSCodeForPhone(adsid, idms, *phoneID)
 				} else {
 					requestErr = client.RequestSMSCode(adsid, idms)
@@ -233,13 +286,17 @@ func run() error {
 				if requestErr != nil {
 					return requestErr
 				}
-				fmt.Println("SMS request accepted")
+				if *trustedDeviceCode {
+					fmt.Println("trusted-device code request accepted; no SMS requested")
+				} else {
+					fmt.Println("SMS request accepted")
+				}
 			}
 			if *requestSMSOnly {
 				return nil
 			}
 			if *codeFile == "" {
-				return fmt.Errorf("SMS code file must not exist before this challenge")
+				return fmt.Errorf("private verification code file path is required")
 			}
 			fmt.Println("awaiting a code for this live challenge")
 			var code string
@@ -250,21 +307,26 @@ func run() error {
 					break
 				}
 				if !os.IsNotExist(err) {
-					return fmt.Errorf("cannot read private SMS file")
+					return fmt.Errorf("cannot read private verification code file")
 				}
 				select {
 				case <-ctx.Done():
-					return fmt.Errorf("SMS challenge wait expired")
+					return fmt.Errorf("verification challenge wait expired")
 				case <-time.After(200 * time.Millisecond):
 				}
 			}
 			if len(code) != 6 || strings.IndexFunc(code, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
-				return fmt.Errorf("invalid SMS code format")
+				return fmt.Errorf("invalid verification code format")
 			}
-			if err := client.SubmitSMSCode(adsid, idms, code); err != nil {
+			if *trustedDeviceCode {
+				err = client.SubmitTrustedDeviceCode(adsid, idms, code)
+			} else {
+				err = client.SubmitSMSCode(adsid, idms, code)
+			}
+			if err != nil {
 				return err
 			}
-			fmt.Println("SMS code accepted")
+			fmt.Println("verification code accepted")
 			if verified := client.VerifiedLoginResult(); verified != nil {
 				auth = verified
 			} else {
@@ -397,6 +459,11 @@ func run() error {
 			if err != nil || writePrivateFile(*icloudCheckpoint, encoded) != nil {
 				return fmt.Errorf("cannot save accepted private iCloud checkpoint")
 			}
+		}
+		if *storagePlan {
+			commerce, _ := services["com.apple.gs.icloud.storage.buy"].(map[string]any)
+			storageToken, _ := commerce["token"].(string)
+			return readStorageOffers(ctx, username, tokens.DSID, adsid, tokens.MMEAuthToken, storageToken, headers)
 		}
 		return nil
 	}
