@@ -22,13 +22,20 @@ func (s *Server) ensureMacPushState(ctx context.Context, dir string) error {
 	if s.provisionMacPush == nil {
 		return errors.New("Mac APS provisioner unavailable")
 	}
-	if err := s.provisionMacPush(ctx, dir); err != nil {
-		return err
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		lastErr = s.provisionMacPush(ctx, dir)
+		if macPushStateReady(dir) {
+			return nil
+		}
 	}
-	if !macPushStateReady(dir) {
-		return errors.New("Mac APS provisioner returned incomplete state")
+	if lastErr != nil {
+		return lastErr
 	}
-	return nil
+	return errors.New("Mac APS provisioner returned incomplete state")
 }
 
 func macPushStateReady(dir string) bool {

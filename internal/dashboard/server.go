@@ -933,6 +933,11 @@ func lastProcessError(path string) string {
 			return "请重新输入当前账号密码"
 		case strings.Contains(line, "ec=-22406") && strings.Contains(line, "correct password"):
 			return "Apple 拒绝了当前密码，请确认使用的是这个账号的最新密码，并关闭密码管理器的旧自动填充"
+		case strings.Contains(line, "ec=-22981") && strings.Contains(line, "tooManyCodesSent=true"):
+			if strings.Contains(line, "noTrustedDevices=true") {
+				return "Apple 已限制该账号继续发送短信验证码，且没有可用受信任设备；请停止重试，等待 Apple 解除限制后再连接"
+			}
+			return "Apple 已限制该账号继续发送短信验证码；请停止重试，等待 Apple 解除限制后再连接"
 		case strings.Contains(line, "client push certificate/key are unavailable"):
 			return "该账号的独立 Mac 推送身份尚未初始化，请重新连接"
 		default:

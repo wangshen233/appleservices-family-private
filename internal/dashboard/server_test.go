@@ -180,6 +180,23 @@ func TestLastProcessErrorMapsRejectedPasswordWithoutExposingLog(t *testing.T) {
 	}
 }
 
+func TestLastProcessErrorMapsSMSRateLimitWithoutExposingLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.err")
+	line := "trusted-device: gsa: fetch boot_args page: status 423; ec=-22981; tooManyCodesSent=true; noTrustedDevices=true"
+	if err := os.WriteFile(path, []byte(line+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := lastProcessError(path)
+	if !strings.Contains(got, "限制该账号继续发送短信验证码") || !strings.Contains(got, "没有可用受信任设备") {
+		t.Fatalf("unexpected message %q", got)
+	}
+	for _, secret := range []string{"-22981", "tooManyCodesSent", "noTrustedDevices", "trusted-device"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("raw diagnostic %q leaked in %q", secret, got)
+		}
+	}
+}
+
 func TestParseFamilyStatusUsesOnlyMarkedRedactedJSON(t *testing.T) {
 	output := "helper diagnostic\n" + familyStatusPrefix + `{"member":true,"members":3,"organizers":1,"self":1,"storage_known":true,"storage_participating":true,"storage_available":true,"storage_enabled":true,"storage_bytes":53687091200}` + "\n"
 	status, err := parseFamilyStatus(output)
