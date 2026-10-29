@@ -99,7 +99,7 @@ func PrepareTerms(page []byte, appleID, udid string, apsToken []byte, timezone s
 	visit(root)
 	iCloud, media := fields["tosversion_field"], fields["amstosversion_field"]
 	version := regexp.MustCompile(`^[0-9]{1,20}$`)
-	if !version.MatchString(iCloud) || !version.MatchString(media) {
+	if !version.MatchString(iCloud) || (media != "" && !version.MatchString(media)) {
 		return nil, errors.New("accountsetup: missing terms versions")
 	}
 	country := fields["countryCode_field"]

@@ -44,3 +44,23 @@ func TestTermsUpdateRejectsDifferentAccountAndCreationPage(t *testing.T) {
 		}
 	}
 }
+
+func TestTermsUpdateAllowsICloudOnlyVersion(t *testing.T) {
+	page := []byte(strings.Replace(string(testPage("owner@example.test")), `id="amstosversion_field" value="456"`, `id="amstosversion_field" value=""`, 1))
+	p, err := PrepareTerms(page, "owner@example.test", strings.Repeat("a", 64), make([]byte, 32), "Asia/Singapore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ICloudVersion != "123" || p.MediaVersion != "" {
+		t.Fatalf("wrong terms versions: iCloud=%q media=%q", p.ICloudVersion, p.MediaVersion)
+	}
+	r, err := p.Request(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(r.Body)
+	values, err := url.ParseQuery(string(data))
+	if err != nil || values.Get("tos-version") != "123" || values.Get("ams-tos-version") != "" {
+		t.Fatal("iCloud-only agreement was not preserved")
+	}
+}

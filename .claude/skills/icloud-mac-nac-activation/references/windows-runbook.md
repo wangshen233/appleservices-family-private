@@ -106,6 +106,8 @@ Keep the completed `$runDir/gsa.json`. Code verification can return a usable PET
 
 Read the returned setup page privately and summarize region and exact iCloud/media version IDs. Terms acceptance requires the owner's authorization for those terms; existing matching authorization in the conversation is sufficient. Do not hard-code another account's region or versions.
 
+Apple can return an iCloud-only update where `tosversion_field` is numeric and `amstosversion_field` is present but empty. Preserve that empty media version and present the approval tuple as `<region>:<icloud-version>:`. Do not invent or copy a media-service version from another account. After explicit approval, submit `ams-tos-version` as empty and still require the server's explicit `success=true` acknowledgement.
+
 ```powershell
 .\bin\accountsetupcheck.exe -dir $accountDir -resume "$runDir/gsa.json" `
   -accept-terms -expected-terms '<region>:<icloud-version>:<media-version>' `
