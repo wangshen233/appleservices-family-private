@@ -531,7 +531,89 @@ func run() (runErr error) {
 		}
 		return control.Result{OK: true, Message: "登录已续期，设备列表已更新"}
 	}
-	performAction := func(actionCtx context.Context, action, visibleRequestID, commandCode string) control.Result {
+	var hmeClient *icloud.HideMyEmailClient
+	pendingHMECandidate := ""
+	loadHME := func(actionCtx context.Context) (*icloud.HideMyEmailInfo, error) {
+		if err := requireHMEFamilyMember(*dir, time.Now().UTC()); err != nil {
+			return nil, err
+		}
+		if hmeClient == nil {
+			var clientErr error
+			hmeClient, clientErr = icloud.NewHideMyEmailClient(*dir, appleID)
+			if clientErr != nil {
+				return nil, clientErr
+			}
+		}
+		info, err := hmeClient.List(actionCtx)
+		if !errors.Is(err, icloud.ErrHMEAuthenticationRequired) {
+			return info, err
+		}
+		if err := hmeClient.Authenticate(actionCtx, password, generateCode); err != nil {
+			return nil, err
+		}
+		return hmeClient.List(actionCtx)
+	}
+	performAction := func(actionCtx context.Context, action, visibleRequestID, commandCode, commandLabel, commandNote string) control.Result {
+		if strings.HasPrefix(action, "hme-") {
+			queryCtx, done := context.WithTimeout(actionCtx, 115*time.Second)
+			defer done()
+			info, err := loadHME(queryCtx)
+			if err != nil {
+				return control.Result{Message: "隐藏邮件地址会话未就绪：" + err.Error(), Stage: "hme-session"}
+			}
+			label := strings.TrimSpace(commandLabel)
+			note := strings.TrimSpace(commandNote)
+			alias := strings.TrimSpace(commandCode)
+			if len(label) > 128 || len(note) > 1024 || len(alias) > 320 {
+				return control.Result{Message: "标签、备忘录或邮箱地址过长", Stage: "hme-validation"}
+			}
+			switch action {
+			case "hme-list":
+				return control.Result{OK: true, Message: "已读取当前子号的隐藏邮件地址", Stage: "hme-list", HideMyEmail: info}
+			case "hme-generate":
+				candidate, generateErr := hmeClient.Generate(queryCtx, "zh-cn")
+				if generateErr != nil {
+					return control.Result{Message: "Apple 未返回可用的候选地址", Stage: "hme-generate"}
+				}
+				pendingHMECandidate = candidate
+				return control.Result{OK: true, Message: "Apple 已生成候选地址；确认后才会正式创建", Stage: "hme-candidate", HideMyEmail: info, HMECandidate: candidate}
+			case "hme-reserve":
+				if pendingHMECandidate == "" || !strings.EqualFold(alias, pendingHMECandidate) || label == "" {
+					return control.Result{Message: "候选地址或标签绑定无效，请重新生成", Stage: "hme-binding"}
+				}
+				if reserveErr := hmeClient.Reserve(queryCtx, pendingHMECandidate, label, note); reserveErr != nil {
+					return control.Result{Message: "候选地址未确认创建；请刷新列表后核对，不要重复提交", Stage: "hme-reserve"}
+				}
+				pendingHMECandidate = ""
+			case "hme-update":
+				if alias == "" || label == "" {
+					return control.Result{Message: "邮箱和标签不能为空", Stage: "hme-validation"}
+				}
+				if updateErr := hmeClient.Update(queryCtx, alias, label, note); updateErr != nil {
+					return control.Result{Message: "标签或备忘录更新未完成", Stage: "hme-update"}
+				}
+			case "hme-deactivate":
+				if setErr := hmeClient.SetActive(queryCtx, alias, false); setErr != nil {
+					return control.Result{Message: "邮箱停用未完成", Stage: "hme-deactivate"}
+				}
+			case "hme-reactivate":
+				if setErr := hmeClient.SetActive(queryCtx, alias, true); setErr != nil {
+					return control.Result{Message: "邮箱恢复未完成", Stage: "hme-reactivate"}
+				}
+			case "hme-delete":
+				if deleteErr := hmeClient.Delete(queryCtx, alias); deleteErr != nil {
+					return control.Result{Message: "永久删除未完成；必须先停用并刷新状态", Stage: "hme-delete"}
+				}
+			default:
+				return control.Result{Message: "不支持的隐藏邮件地址操作", Stage: "hme-action"}
+			}
+			info, err = hmeClient.List(queryCtx)
+			if err != nil {
+				return control.Result{Message: "操作已提交，但列表回读未完成；请勿重复操作", Stage: "hme-readback"}
+			}
+			messages := map[string]string{"hme-reserve": "隐藏邮件地址已创建并通过列表回读", "hme-update": "标签和备忘录已更新", "hme-deactivate": "隐藏邮件地址已停用", "hme-reactivate": "隐藏邮件地址已恢复", "hme-delete": "隐藏邮件地址已永久删除"}
+			return control.Result{OK: true, Message: messages[action], Stage: action + "-completed", HideMyEmail: info}
+		}
 		if action == "storage-preview" {
 			previewer, ok := active.(interface {
 				PreviewStoragePurchase(context.Context) (*icloud.StoreFormInfo, error)
@@ -1092,7 +1174,7 @@ func run() (runErr error) {
 				command.Reply <- control.Result{Message: "请重新查看当前登录请求"}
 				continue
 			}
-			command.Reply <- performAction(command.Context, command.Action.Action, command.RequestID, command.Code)
+			command.Reply <- performAction(command.Context, command.Action.Action, command.RequestID, command.Code, command.Label, command.Note)
 		case <-refresh.C:
 			result := renew()
 			if status.VerificationRequired {
@@ -1192,7 +1274,7 @@ func run() (runErr error) {
 			if choice != "devices" && choice != "refresh" && choice != "code" && choice != "allow" && choice != "deny" {
 				continue
 			}
-			result := performAction(ctx, choice, "", "")
+			result := performAction(ctx, choice, "", "", "", "")
 			if result.Code != "" {
 				fmt.Println("Apple verification code:", result.Code)
 			} else {

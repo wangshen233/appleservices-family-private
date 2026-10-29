@@ -419,7 +419,7 @@ func (s *Server) callFor(ctx context.Context, dir, path string, body any, result
 	if action, ok := body.(control.Action); ok {
 		if action.Action == "storage-skill-auth-file" {
 			timeout = 3*time.Minute + 5*time.Second
-		} else if action.Action == "family-add-self" {
+		} else if action.Action == "family-add-self" || strings.HasPrefix(action.Action, "hme-") {
 			timeout = 2*time.Minute + 5*time.Second
 		}
 	}
@@ -1123,7 +1123,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(result)
 				return
 			}
-			if (action.Action == "storage-info" || action.Action == "storage-plan") && !s.readStatusFrom(dir).Running && selected != nil && acceptedCheckpointReady(dir, selected.AppleID) {
+			// Storage reads use the accepted iCloud checkpoint even while the
+			// account worker is online. This keeps automatic cache maintenance
+			// from occupying the same control channel as HME and other commands.
+			if (action.Action == "storage-info" || action.Action == "storage-plan") && selected != nil && acceptedCheckpointReady(dir, selected.AppleID) {
 				result = s.acceptedStorageAction(r.Context(), selected, action.Action == "storage-plan")
 				cacheSafeActionResult(selected, &result)
 				json.NewEncoder(w).Encode(result)

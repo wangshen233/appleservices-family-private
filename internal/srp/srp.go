@@ -172,3 +172,13 @@ func (c *Client) VerifyServer(m2 []byte) error {
 	}
 	return nil
 }
+
+// ExpectedM2 returns the client-computed server proof after ProcessChallenge.
+// Apple's web SRP endpoint requires this value in signin/complete before it
+// returns its final authentication result.
+func (c *Client) ExpectedM2() ([]byte, error) {
+	if c.m1 == nil || c.key == nil {
+		return nil, errors.New("srp: ProcessChallenge must be called before ExpectedM2")
+	}
+	return calcM2(c.A, c.m1, c.key), nil
+}

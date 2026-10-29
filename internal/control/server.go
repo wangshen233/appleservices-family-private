@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +48,8 @@ type Action struct {
 	Action    string `json:"action"`
 	Code      string `json:"code,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
+	Label     string `json:"label,omitempty"`
+	Note      string `json:"note,omitempty"`
 }
 type Result struct {
 	OK                  bool                            `json:"ok"`
@@ -65,6 +68,8 @@ type Result struct {
 	StoreForm           *icloud.StoreFormInfo           `json:"store_form,omitempty"`
 	Probes              []icloud.StorageEndpointProbe   `json:"probes,omitempty"`
 	Family              *FamilyInfo                     `json:"family,omitempty"`
+	HideMyEmail         *icloud.HideMyEmailInfo         `json:"hide_my_email,omitempty"`
+	HMECandidate        string                          `json:"hme_candidate,omitempty"`
 }
 
 // FamilyInfo is the redacted, UI-safe state returned by the native FamilyKit
@@ -183,7 +188,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch action.Action {
-	case "code", "devices", "refresh", "validate-account", "allow", "deny", "submit-sms", "resend-sms", "submit-account-code", "storage-info", "storage-plan", "storage-authenticate", "storage-skill-auth-local", "storage-skill-auth-file", "storage-skill-purchase-us", "storage-preview", "storage-purchase", "storage-probe", "storage-buy", "family-info", "family-add-self", "family-join-storage", "submit-pairing":
+	case "code", "devices", "refresh", "validate-account", "allow", "deny", "submit-sms", "resend-sms", "submit-account-code", "storage-info", "storage-plan", "storage-authenticate", "storage-skill-auth-local", "storage-skill-auth-file", "storage-skill-purchase-us", "storage-preview", "storage-purchase", "storage-probe", "storage-buy", "family-info", "family-add-self", "family-join-storage", "hme-list", "hme-generate", "hme-reserve", "hme-update", "hme-deactivate", "hme-reactivate", "hme-delete", "submit-pairing":
 	default:
 		http.Error(w, `{"message":"unknown action"}`, 400)
 		return
@@ -191,7 +196,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	timeout := 90 * time.Second
 	if action.Action == "storage-skill-auth-file" {
 		timeout = 3 * time.Minute
-	} else if action.Action == "family-add-self" {
+	} else if action.Action == "family-add-self" || strings.HasPrefix(action.Action, "hme-") {
 		timeout = 2 * time.Minute
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
