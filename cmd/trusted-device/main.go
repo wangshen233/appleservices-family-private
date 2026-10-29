@@ -49,7 +49,7 @@ func run() (runErr error) {
 	keyPath := flag.String("push-key", "", "matching client push private key PEM file")
 	codeProvider := flag.String("code-provider", "", "absolute path to a working local ADI code-provider executable")
 	server := flag.String("anisette", "https://ani.sidestore.io", "anisette server for this identity")
-	method := flag.String("twofactor", "sms", "initial sign-in method: sms, trusted-device or circle")
+	method := flag.String("twofactor", "sms", "initial sign-in method: sms, sms-existing, trusted-device or circle")
 	check := flag.Bool("check", false, "check local prerequisites without contacting Apple")
 	native := flag.Bool("native-push", false, "use the installed iCloud for Windows APS daemon")
 	probeNative := flag.Bool("probe-native-push", false, "check native token and local callback; no account registration")
@@ -85,8 +85,8 @@ func run() (runErr error) {
 		fmt.Println("Account trust and remote code delivery have not been verified.")
 		return nil
 	}
-	if *method != "sms" && *method != "trusted-device" && *method != "circle" {
-		return errors.New("twofactor must be sms, trusted-device or circle")
+	if *method != "sms" && *method != "sms-existing" && *method != "trusted-device" && *method != "circle" {
+		return errors.New("twofactor must be sms, sms-existing, trusted-device or circle")
 	}
 	if *listenFor < 0 {
 		return errors.New("listen-for must not be negative")
@@ -310,13 +310,17 @@ func run() (runErr error) {
 		if *method == "trusted-device" {
 			factor = appleservices.TrustedDevice
 		}
-		if err := login.RequestCode(factor); err != nil {
-			return err
+		if *method != "sms-existing" {
+			if err := login.RequestCode(factor); err != nil {
+				return err
+			}
 		}
 		if panel != nil && *guiAuth {
 			status.State, status.VerificationRequired = "awaiting_sms", true
 			if factor == appleservices.TrustedDevice {
 				status.State = "awaiting_device_code"
+			} else if *method == "sms-existing" {
+				status.State = "awaiting_existing_sms"
 			}
 			if err := status.save(*dir); err != nil {
 				return err

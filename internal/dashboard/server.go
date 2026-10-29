@@ -856,7 +856,7 @@ func (s *Server) startIn(ctx context.Context, dir string, creds credentials, acc
 	if creds.TwoFactor == "" {
 		creds.TwoFactor = "sms"
 	}
-	if creds.TwoFactor != "sms" && creds.TwoFactor != "circle" && creds.TwoFactor != "trusted-device" {
+	if creds.TwoFactor != "sms" && creds.TwoFactor != "sms-existing" && creds.TwoFactor != "circle" && creds.TwoFactor != "trusted-device" {
 		return control.Result{Message: "不支持的验证方式"}
 	}
 	s.setLaunching(account, true)
