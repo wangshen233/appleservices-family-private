@@ -242,7 +242,10 @@ func (l *Login) SubmitCode(method TwoFactorMethod, code string) error {
 			l.result = result
 			l.needsTwoFactor = false
 			l.storeCommerce = nil
-			return l.persistDevice()
+			if err := l.persistDevice(); err != nil {
+				return err
+			}
+			return l.checkpointVerifiedGSA()
 		}
 	}
 	if err := l.authenticate(); err != nil {
@@ -250,6 +253,25 @@ func (l *Login) SubmitCode(method TwoFactorMethod, code string) error {
 	}
 	if l.needsTwoFactor {
 		return errors.New("appleservices: still prompted for 2FA after submitting a code")
+	}
+	return l.checkpointVerifiedGSA()
+}
+
+// checkpointVerifiedGSA preserves a just-verified two-factor session before
+// the independent iCloud delegate exchange. A delegate refusal must not throw
+// away an accepted SMS/device challenge and force another verification code.
+func (l *Login) checkpointVerifiedGSA() error {
+	if l.needsTwoFactor || l.result == nil || l.result.SessionPayload == nil {
+		return errors.New("appleservices: verified GSA session is unavailable")
+	}
+	gsess, err := l.backend.Snapshot(l.adsid, spdTokens(l.result.SessionPayload))
+	if err != nil {
+		return fmt.Errorf("appleservices: snapshot verified GSA session: %w", err)
+	}
+	sess := fromGSASession(gsess)
+	sess.AppleID = l.creds.AppleID
+	if err := l.store.SaveSession(&sess); err != nil {
+		return fmt.Errorf("appleservices: save verified GSA session: %w", err)
 	}
 	return nil
 }

@@ -214,9 +214,33 @@ func TestTwoFactorCompletesWithBothMethods(t *testing.T) {
 		if _, err := l.Client(); err != nil {
 			t.Fatal(err)
 		}
-		if s.saves != 1 {
-			t.Fatal("two-factor login did not save trusted session")
+		if s.saves != 2 {
+			t.Fatal("two-factor login did not checkpoint GSA before saving the accepted iCloud session")
 		}
+	}
+}
+
+func TestTwoFactorCheckpointSurvivesICloudDelegateRejection(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{results: []*gsa.LoginResult{testResult(true), testResult(false)}}
+	fetch := func(map[string]string, string, string, string) (icloud.DelegateTokens, error) {
+		return icloud.DelegateTokens{}, errors.New("test delegate rejection")
+	}
+	login, err := BeginLogin(Credentials{"owner@example.test", "test-password"}, store, testOptions(backend, fetch)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := login.SubmitCode(SMS, "123456"); err != nil {
+		t.Fatal(err)
+	}
+	if store.saves != 1 || store.session == nil || store.session.AppleID != "owner@example.test" {
+		t.Fatal("verified GSA session was not checkpointed before iCloud delegate")
+	}
+	if _, err := login.Client(); err == nil {
+		t.Fatal("delegate rejection was reported as success")
+	}
+	if store.saves != 1 {
+		t.Fatal("delegate rejection overwrote or removed the verified GSA checkpoint")
 	}
 }
 
@@ -305,7 +329,7 @@ func TestIssuedVerificationPETAvoidsAnotherChallenge(t *testing.T) {
 	if _, err := l.Client(); err != nil {
 		t.Fatal(err)
 	}
-	if s.saves != 1 {
-		t.Fatal("verified header session did not complete iCloud login")
+	if s.saves != 2 {
+		t.Fatal("verified header session was not checkpointed before completing iCloud login")
 	}
 }

@@ -938,6 +938,8 @@ func lastProcessError(path string) string {
 				return "Apple 已限制该账号继续发送短信验证码，且没有可用受信任设备；请停止重试，等待 Apple 解除限制后再连接"
 			}
 			return "Apple 已限制该账号继续发送短信验证码；请停止重试，等待 Apple 解除限制后再连接"
+		case strings.Contains(line, "mobileme delegate refused status=1"):
+			return "验证码已经通过，但 Apple 拒绝了 iCloud 服务会话；已保留验证会话，请继续处理账号激活或条款状态"
 		case strings.Contains(line, "client push certificate/key are unavailable"):
 			return "该账号的独立 Mac 推送身份尚未初始化，请重新连接"
 		default:

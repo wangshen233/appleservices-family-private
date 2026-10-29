@@ -197,6 +197,21 @@ func TestLastProcessErrorMapsSMSRateLimitWithoutExposingLog(t *testing.T) {
 	}
 }
 
+func TestLastProcessErrorSeparatesAcceptedCodeFromDelegateRefusal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.err")
+	line := "trusted-device: appleservices: iCloud login: icloud: mobileme delegate refused status=1"
+	if err := os.WriteFile(path, []byte(line+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := lastProcessError(path)
+	if !strings.Contains(got, "验证码已经通过") || !strings.Contains(got, "已保留验证会话") {
+		t.Fatalf("unexpected message %q", got)
+	}
+	if strings.Contains(got, "mobileme") || strings.Contains(got, "status=1") {
+		t.Fatalf("raw delegate diagnostic leaked in %q", got)
+	}
+}
+
 func TestParseFamilyStatusUsesOnlyMarkedRedactedJSON(t *testing.T) {
 	output := "helper diagnostic\n" + familyStatusPrefix + `{"member":true,"members":3,"organizers":1,"self":1,"storage_known":true,"storage_participating":true,"storage_available":true,"storage_enabled":true,"storage_bytes":53687091200}` + "\n"
 	status, err := parseFamilyStatus(output)
