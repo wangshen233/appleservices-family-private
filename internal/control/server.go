@@ -64,6 +64,32 @@ type Result struct {
 	StoreAuthentication *icloud.StoreAuthenticationInfo `json:"store_authentication,omitempty"`
 	StoreForm           *icloud.StoreFormInfo           `json:"store_form,omitempty"`
 	Probes              []icloud.StorageEndpointProbe   `json:"probes,omitempty"`
+	Family              *FamilyInfo                     `json:"family,omitempty"`
+}
+
+// FamilyInfo is the redacted, UI-safe state returned by the native FamilyKit
+// helper. It intentionally contains no account identifiers, DSIDs, family IDs,
+// invite codes, tokens, cookies or raw Apple responses.
+type FamilyInfo struct {
+	Member                 bool  `json:"member"`
+	Eligible               bool  `json:"eligible"`
+	EligibilityKnown       bool  `json:"eligibility_known"`
+	Members                int   `json:"members"`
+	Organizers             int   `json:"organizers"`
+	Self                   int   `json:"self"`
+	Children               int   `json:"children"`
+	Invitations            int   `json:"invitations"`
+	Pending                int   `json:"pending"`
+	Organizer              bool  `json:"organizer"`
+	StorageKnown           bool  `json:"storage_known"`
+	StorageParticipating   bool  `json:"storage_participating"`
+	StorageAvailable       bool  `json:"storage_available"`
+	StorageEnabled         bool  `json:"storage_enabled"`
+	StorageBytes           int64 `json:"storage_bytes,omitempty"`
+	PurchaseSharingKnown   bool  `json:"purchase_sharing_known"`
+	PurchaseSharingEnabled bool  `json:"purchase_sharing_enabled"`
+	LocationSharingKnown   bool  `json:"location_sharing_known"`
+	LocationSharingEnabled bool  `json:"location_sharing_enabled"`
 }
 type Command struct {
 	Action
@@ -154,7 +180,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch action.Action {
-	case "code", "devices", "refresh", "validate-account", "allow", "deny", "submit-sms", "resend-sms", "submit-account-code", "storage-info", "storage-plan", "storage-authenticate", "storage-skill-auth-local", "storage-skill-auth-file", "storage-skill-purchase-us", "storage-preview", "storage-purchase", "storage-probe", "storage-buy", "submit-pairing":
+	case "code", "devices", "refresh", "validate-account", "allow", "deny", "submit-sms", "resend-sms", "submit-account-code", "storage-info", "storage-plan", "storage-authenticate", "storage-skill-auth-local", "storage-skill-auth-file", "storage-skill-purchase-us", "storage-preview", "storage-purchase", "storage-probe", "storage-buy", "family-info", "family-add-self", "family-join-storage", "submit-pairing":
 	default:
 		http.Error(w, `{"message":"unknown action"}`, 400)
 		return
@@ -162,6 +188,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	timeout := 90 * time.Second
 	if action.Action == "storage-skill-auth-file" {
 		timeout = 3 * time.Minute
+	} else if action.Action == "family-add-self" {
+		timeout = 2 * time.Minute
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()

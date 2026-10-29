@@ -106,6 +106,32 @@ func TestDashboardControlAddressCannotReachExternalHosts(t *testing.T) {
 	}
 }
 
+func TestAccountPrivateControlKeepsRenamedLiveWorkerOnline(t *testing.T) {
+	root := t.TempDir()
+	accountDir := filepath.Join(root, "accounts", "04-account")
+	if err := os.MkdirAll(accountDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(Config{Dir: root, Worker: filepath.Join(root, "bin", "replacement-worker.exe"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.listener.Close()
+	controller, err := control.New(accountDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	data, _ := json.Marshal(Status{PID: os.Getpid(), Running: true, Authenticated: true, PushConnected: true, State: "online"})
+	if err := os.WriteFile(filepath.Join(accountDir, "runtime.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	status := server.readStatusFrom(accountDir)
+	if !status.Running || !status.Authenticated || !status.PushConnected || status.State != "online" {
+		t.Fatalf("account-private live control was ignored: %#v", status)
+	}
+}
+
 func TestDeadSavedPIDDoesNotClaimOnlineOrSkipLogin(t *testing.T) {
 	dir := t.TempDir()
 	server, err := New(Config{Dir: dir, Worker: filepath.Join(dir, "worker.exe"), Port: 0})
@@ -135,6 +161,35 @@ func TestLastProcessErrorDoesNotExposeLogSecrets(t *testing.T) {
 	}
 	if got := lastProcessError(path); got == "" || strings.Contains(got, "second") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestLastProcessErrorMapsRejectedPasswordWithoutExposingLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.err")
+	line := "trusted-device: gsa: complete rejected (protocol=s2k, ec=-22406) - server said: Enter the correct password for this Apple Account."
+	if err := os.WriteFile(path, []byte(line+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := lastProcessError(path)
+	if !strings.Contains(got, "Apple 拒绝了当前密码") {
+		t.Fatalf("unexpected message %q", got)
+	}
+	if strings.Contains(got, "-22406") || strings.Contains(got, "trusted-device") {
+		t.Fatalf("raw diagnostic leaked in %q", got)
+	}
+}
+
+func TestParseFamilyStatusUsesOnlyMarkedRedactedJSON(t *testing.T) {
+	output := "helper diagnostic\n" + familyStatusPrefix + `{"member":true,"members":3,"organizers":1,"self":1,"storage_known":true,"storage_participating":true,"storage_available":true,"storage_enabled":true,"storage_bytes":53687091200}` + "\n"
+	status, err := parseFamilyStatus(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Member || status.Members != 3 || status.Self != 1 || !status.StorageParticipating || status.StorageBytes != 53687091200 {
+		t.Fatalf("unexpected family status: %#v", status)
+	}
+	if _, err := parseFamilyStatus(`{"member":true}`); err == nil {
+		t.Fatal("unmarked helper output accepted")
 	}
 }
 

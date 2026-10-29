@@ -278,7 +278,7 @@ func (s *Server) readStatusFrom(dir string) Status {
 	var status Status
 	data, _ := os.ReadFile(filepath.Join(dir, "runtime.json"))
 	json.Unmarshal(data, &status)
-	if !status.Running || !s.owns(status.PID) {
+	if !status.Running || !s.ownsIn(status.PID, dir) {
 		status.Running = false
 		status.Authenticated = false
 		status.PushConnected = false
@@ -288,24 +288,31 @@ func (s *Server) readStatusFrom(dir string) Status {
 	}
 	return status
 }
-func (s *Server) owns(pid int) bool {
+func (s *Server) owns(pid int) bool { return s.ownsIn(pid, s.config.Dir) }
+
+func (s *Server) ownsIn(pid int, dir string) bool {
 	path := processPath(pid)
-	// Missing process information is not evidence that a saved PID is alive.
-	// For an inaccessible worker, require a live authenticated control reply.
+	// A live account-private control reply is required when Windows reports an
+	// inaccessible or renamed image during worker binary replacement.
 	if path == "" {
-		return s.controlAlive(pid)
+		return s.controlAliveIn(pid, dir)
 	}
 	cleanPath := filepath.Clean(path)
 	// Windows may retain the previous image under a temporary '~' suffix when
 	// the worker binary is rebuilt while that worker is still running.
 	cleanPath = strings.TrimRight(cleanPath, "~")
-	return strings.EqualFold(cleanPath, filepath.Clean(s.config.Worker)) || strings.EqualFold(cleanPath, filepath.Join(filepath.Dir(s.config.Worker), "trusted-device.exe"))
+	if strings.EqualFold(cleanPath, filepath.Clean(s.config.Worker)) || strings.EqualFold(cleanPath, filepath.Join(filepath.Dir(s.config.Worker), "trusted-device.exe")) {
+		return true
+	}
+	return s.controlAliveIn(pid, dir)
 }
-func (s *Server) controlAlive(pid int) bool {
+func (s *Server) controlAlive(pid int) bool { return s.controlAliveIn(pid, s.config.Dir) }
+
+func (s *Server) controlAliveIn(pid int, dir string) bool {
 	if pid <= 0 {
 		return false
 	}
-	data, err := os.ReadFile(filepath.Join(s.config.Dir, "control.json"))
+	data, err := os.ReadFile(filepath.Join(dir, "control.json"))
 	if err != nil {
 		return false
 	}
@@ -362,7 +369,7 @@ func (s *Server) recordFor(dir string) (control.Record, error) {
 	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.Port() == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return control.Record{}, errors.New("无效的本机控制地址")
 	}
-	if key, err := hex.DecodeString(record.Token); err != nil || len(key) != 32 || record.PID != s.readStatusFrom(dir).PID || !s.owns(record.PID) {
+	if key, err := hex.DecodeString(record.Token); err != nil || len(key) != 32 || record.PID != s.readStatusFrom(dir).PID || !s.ownsIn(record.PID, dir) {
 		return control.Record{}, errors.New("后台尚未就绪")
 	}
 	return record, nil
@@ -392,8 +399,12 @@ func (s *Server) callFor(ctx context.Context, dir, path string, body any, result
 	request.Header.Set("X-Control-Token", record.Token)
 	request.Header.Set("Content-Type", "application/json")
 	timeout := 95 * time.Second
-	if action, ok := body.(control.Action); ok && action.Action == "storage-skill-auth-file" {
-		timeout = 3*time.Minute + 5*time.Second
+	if action, ok := body.(control.Action); ok {
+		if action.Action == "storage-skill-auth-file" {
+			timeout = 3*time.Minute + 5*time.Second
+		} else if action.Action == "family-add-self" {
+			timeout = 2*time.Minute + 5*time.Second
+		}
 	}
 	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)
@@ -409,6 +420,58 @@ func (s *Server) callFor(ctx context.Context, dir, path string, body any, result
 		return errors.New("后台返回了无效数据")
 	}
 	return nil
+}
+
+const familyStatusPrefix = "FAMILY_STATUS_JSON="
+
+func parseFamilyStatus(output string) (*control.FamilyInfo, error) {
+	lines := strings.Split(output, "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if !strings.HasPrefix(line, familyStatusPrefix) {
+			continue
+		}
+		var status control.FamilyInfo
+		if json.Unmarshal([]byte(strings.TrimPrefix(line, familyStatusPrefix)), &status) != nil {
+			return nil, errors.New("家庭工具返回了无效状态")
+		}
+		return &status, nil
+	}
+	return nil, errors.New("家庭工具没有返回状态")
+}
+
+func (s *Server) familyAction(ctx context.Context, account *Account, joinStorage bool) control.Result {
+	if account == nil || !acceptedCheckpointReady(account.Dir, account.AppleID) {
+		return control.Result{Message: "当前账号尚未完成 iCloud 激活", Stage: "family-preflight"}
+	}
+	helper := filepath.Join(filepath.Dir(s.config.Worker), "familyinspect.exe")
+	if info, err := os.Stat(helper); err != nil || !info.Mode().IsRegular() {
+		return control.Result{Message: "家庭工具不可用，请重新构建本地后台", Stage: "family-worker"}
+	}
+	actionCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	args := []string{"-dir", account.Dir, "-safe-json"}
+	message, stage := "Apple 已返回当前家庭状态", "family-info"
+	if joinStorage {
+		args = append(args, "-join-shared-storage")
+		message, stage = "已加入家庭共享的 iCloud+ 储存空间", "family-storage-joined"
+	}
+	command := exec.CommandContext(actionCtx, helper, args...)
+	command.Env = os.Environ()
+	var output bytes.Buffer
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Run(); err != nil {
+		return control.Result{Message: "家庭操作未完成，请刷新状态后核对", Stage: "family-action"}
+	}
+	family, err := parseFamilyStatus(output.String())
+	if err != nil {
+		return control.Result{Message: err.Error(), Stage: "family-readback"}
+	}
+	if joinStorage && (!family.StorageKnown || !family.StorageParticipating || !family.StorageAvailable || !family.StorageEnabled) {
+		return control.Result{Message: "家庭共享储存尚未完整生效", Stage: "family-storage-readback", Family: family}
+	}
+	return control.Result{OK: true, Message: message, Stage: stage, Family: family}
 }
 func (s *Server) snapshot(ctx context.Context) view { return s.snapshotFor(ctx, "") }
 
@@ -584,6 +647,8 @@ func lastProcessError(path string) string {
 			return "所选目录缺少有效设备身份，请选择已有账号，或通过添加账号建立身份"
 		case strings.Contains(line, "APPLESERVICES_APPLEID and APPLESERVICES_PASSWORD are required"):
 			return "请重新输入当前账号密码"
+		case strings.Contains(line, "ec=-22406") && strings.Contains(line, "correct password"):
+			return "Apple 拒绝了当前密码，请确认使用的是这个账号的最新密码，并关闭密码管理器的旧自动填充"
 		case strings.Contains(line, "client push certificate/key are unavailable"):
 			return "该账号的独立 Mac 推送身份尚未初始化，请重新连接"
 		default:
@@ -651,7 +716,7 @@ func (s *Server) stopIn(ctx context.Context, dir string) error {
 	for {
 		select {
 		case <-ticker.C:
-			if !s.owns(status.PID) {
+			if !s.ownsIn(status.PID, dir) {
 				return nil
 			}
 		case <-timer.C:
@@ -784,6 +849,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			var result control.Result
+			if selected != nil && (action.Action == "family-info" || action.Action == "family-join-storage") {
+				result = s.familyAction(r.Context(), selected, action.Action == "family-join-storage")
+				json.NewEncoder(w).Encode(result)
+				return
+			}
 			if (action.Action == "storage-info" || action.Action == "storage-plan") && !s.readStatusFrom(dir).Running && selected != nil && acceptedCheckpointReady(dir, selected.AppleID) {
 				result = s.acceptedStorageAction(r.Context(), selected, action.Action == "storage-plan")
 				json.NewEncoder(w).Encode(result)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -639,6 +641,76 @@ func run() (runErr error) {
 			}
 			return control.Result{OK: true, Purchase: purchase, Message: "美区 50GB 订阅和付费配额均已核验", Stage: "purchase-completed"}
 		}
+		if action == "family-info" || action == "family-add-self" || action == "family-join-storage" {
+			executable, execErr := os.Executable()
+			if execErr != nil {
+				return control.Result{Message: "家庭工具不可用", Stage: "family-worker"}
+			}
+			helper := filepath.Join(filepath.Dir(executable), "familyinspect.exe")
+			if info, statErr := os.Stat(helper); statErr != nil || !info.Mode().IsRegular() {
+				return control.Result{Message: "家庭工具不可用", Stage: "family-worker"}
+			}
+			queryCtx, done := context.WithTimeout(actionCtx, 105*time.Second)
+			defer done()
+			args := []string{"-dir", *dir, "-safe-json"}
+			env := []string(nil)
+			message, stage := "Apple 已返回当前家庭状态", "family-info"
+			if action == "family-join-storage" {
+				args = append(args, "-join-shared-storage")
+				message, stage = "已加入家庭共享的 iCloud+ 储存空间", "family-storage-joined"
+			}
+			if action == "family-add-self" {
+				organizerID := strings.TrimSpace(commandCode)
+				if organizerID == "" || organizerID == filepath.Base(filepath.Clean(*dir)) || strings.IndexFunc(organizerID, func(r rune) bool {
+					return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-')
+				}) >= 0 {
+					return control.Result{Message: "组织者账号绑定无效", Stage: "family-binding"}
+				}
+				accountsRoot := filepath.Dir(filepath.Clean(*dir))
+				organizerDir := filepath.Join(accountsRoot, organizerID)
+				if filepath.Dir(organizerDir) != accountsRoot {
+					return control.Result{Message: "组织者账号目录无效", Stage: "family-binding"}
+				}
+				args = []string{"-dir", organizerDir, "-add-pool-member-dir", *dir, "-target-password-env", "-safe-json"}
+				env = []string{"APPLESERVICES_TARGET_PASSWORD=" + password}
+				message, stage = "池内账号已加入家庭并通过双端回读", "family-added"
+			}
+			output, execErr := runFamilyHelper(queryCtx, helper, args, env)
+			if execErr != nil {
+				return control.Result{Message: "家庭操作未完成：" + lastNonEmptyLine(output), Stage: "family-action"}
+			}
+			if action == "family-add-self" {
+				// The mutation runs under the organizer's identity; return a fresh
+				// target-side view so the UI never treats an invitation or one-sided
+				// response as completed membership.
+				output, execErr = runFamilyHelper(queryCtx, helper, []string{"-dir", *dir, "-safe-json"}, nil)
+				if execErr != nil {
+					return control.Result{Message: "家庭已提交，但目标账号回读未完成：" + lastNonEmptyLine(output), Stage: "family-readback"}
+				}
+			}
+			family, parseErr := parseFamilyStatus(output)
+			if parseErr != nil {
+				return control.Result{Message: "家庭状态回读无效", Stage: "family-readback"}
+			}
+			if action == "family-add-self" && (!family.Member || family.Self != 1) {
+				return control.Result{Message: "目标账号尚未确认成为家庭成员", Stage: "family-readback", Family: family}
+			}
+			if action == "family-add-self" && family.StorageKnown && family.StorageAvailable && !family.StorageParticipating {
+				output, execErr = runFamilyHelper(queryCtx, helper, []string{"-dir", *dir, "-join-shared-storage", "-safe-json"}, nil)
+				if execErr != nil {
+					return control.Result{Message: "家庭成员已加入，但共享储存加入未完成：" + lastNonEmptyLine(output), Stage: "family-storage", Family: family}
+				}
+				family, parseErr = parseFamilyStatus(output)
+				if parseErr != nil || !family.StorageKnown || !family.StorageParticipating || !family.StorageAvailable || !family.StorageEnabled {
+					return control.Result{Message: "家庭成员已加入，但共享储存回读未完整生效", Stage: "family-storage-readback", Family: family}
+				}
+				message = "池内账号已加入家庭并启用共享 iCloud+ 储存"
+			}
+			if action == "family-join-storage" && (!family.StorageKnown || !family.StorageParticipating || !family.StorageAvailable || !family.StorageEnabled) {
+				return control.Result{Message: "家庭共享储存尚未完整生效", Stage: "family-storage-readback", Family: family}
+			}
+			return control.Result{OK: true, Message: message, Stage: stage, Family: family}
+		}
 		if action == "storage-info" {
 			reader, ok := active.(interface {
 				StorageInfo(context.Context) (*appleservices.StorageInfo, error)
@@ -1128,6 +1200,52 @@ func run() (runErr error) {
 			}
 		}
 	}
+}
+
+func lastNonEmptyLine(value string) string {
+	lines := strings.Split(value, "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if line == "" {
+			continue
+		}
+		if len(line) > 200 {
+			line = line[:200]
+		}
+		return line
+	}
+	return "家庭工具未返回状态"
+}
+
+const familyStatusPrefix = "FAMILY_STATUS_JSON="
+
+func runFamilyHelper(ctx context.Context, helper string, args, extraEnv []string) (string, error) {
+	command := exec.CommandContext(ctx, helper, args...)
+	command.Env = append(os.Environ(), extraEnv...)
+	var output bytes.Buffer
+	command.Stdout = &output
+	command.Stderr = &output
+	err := command.Run()
+	for index := range extraEnv {
+		extraEnv[index] = ""
+	}
+	return output.String(), err
+}
+
+func parseFamilyStatus(output string) (*control.FamilyInfo, error) {
+	lines := strings.Split(output, "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if !strings.HasPrefix(line, familyStatusPrefix) {
+			continue
+		}
+		var status control.FamilyInfo
+		if json.Unmarshal([]byte(strings.TrimPrefix(line, familyStatusPrefix)), &status) != nil {
+			return nil, errors.New("invalid redacted family status")
+		}
+		return &status, nil
+	}
+	return nil, errors.New("redacted family status missing")
 }
 
 func codeRequest(device *appleservices.Device) aps.CodeRequest {

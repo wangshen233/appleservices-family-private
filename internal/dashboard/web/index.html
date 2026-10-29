@@ -40,7 +40,24 @@
   </section>
   <div class="notice overview-only" id="capabilityNotice" role="status" hidden></div>
   <section class="request-card overview-only"><div class="card-title-row"><h3>iCloud 储存空间</h3><button class="text-button" id="storageButton" disabled>查询储存空间</button></div><p id="storageSummary" class="card-description">登录后查询当前容量和使用情况。</p></section>
-  <section class="request-card overview-only"><div class="card-title-row"><h3>iCloud+ 方案</h3><div class="commerce-actions"><button class="text-button" id="planButton" disabled>读取可购方案</button><button class="text-button" id="storeAuthButton" disabled>验证购买会话</button><button class="text-button" id="purchaseButton" disabled>提交 50GB / ¥6</button></div></div><p id="planSummary" class="card-description">读取 Apple 返回的方案后，才能核对中国大陆 50GB / ¥6 每月。</p><p id="storeAuthSummary" class="card-description">购买会话尚未验证。</p><form id="storeAuthForm" hidden><input id="storeCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="Apple Store 六位验证码" aria-label="Apple Store 六位验证码" required><button class="text-button" type="submit">完成购买会话验证</button></form><div id="planList" class="plan-list"></div></section>
+  <section class="request-card overview-only family-card" id="familyCard">
+    <div class="card-title-row"><div><h3>家庭共享</h3><p class="card-description">查看成员资格，并把当前账号加入池内母号的共享 iCloud+。</p></div><button class="text-button" id="familyRefreshButton" disabled>读取家庭状态</button></div>
+    <div class="family-status" id="familyStatus"><span class="family-state-dot"></span><div><strong id="familySummary">尚未读取家庭状态</strong><p id="familyDetail">操作前会实时核对成员、组织者和共享储存状态。</p></div></div>
+    <div class="family-metrics" id="familyMetrics" hidden>
+      <div><small>家庭成员</small><strong id="familyMemberCount">—</strong></div>
+      <div><small>当前角色</small><strong id="familyRole">—</strong></div>
+      <div><small>共享储存</small><strong id="familyStorageState">—</strong></div>
+      <div><small>共享容量</small><strong id="familyStorageBytes">—</strong></div>
+    </div>
+    <div class="family-controls">
+      <label for="familyOrganizer">池内母号</label>
+      <select id="familyOrganizer" aria-label="池内母号"></select>
+      <button class="button button-primary" id="familyAddButton" disabled>加入家庭并使用共享空间</button>
+      <button class="button button-light" id="familyJoinStorageButton" disabled>仅加入共享储存</button>
+    </div>
+    <p class="family-safety" id="familySafety">购买共享和位置共享不会开启；验证码仅在 Apple 挑战出现后由当前账号自己的本地 Mac 身份生成。</p>
+  </section>
+  <section class="request-card overview-only"><div class="card-title-row"><h3>iCloud+ 方案</h3><div class="commerce-actions"><button class="text-button" id="planButton" disabled>读取可购方案</button><button class="text-button" id="storeAuthButton" disabled>验证购买会话</button><button class="text-button" id="purchaseButton" disabled>提交 50GB 方案</button></div></div><p id="planSummary" class="card-description">先读取 Apple 实时报价；仅已验证的币种与价格会启用购买按钮。</p><p id="storeAuthSummary" class="card-description">购买会话尚未验证。</p><form id="storeAuthForm" hidden><input id="storeCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="Apple Store 六位验证码" aria-label="Apple Store 六位验证码" required><button class="text-button" type="submit">完成购买会话验证</button></form><div id="planList" class="plan-list"></div></section>
   <section class="verification-banner overview-only" id="smsPanel" hidden><div><span class="card-kicker dark">首次登录验证</span><h3>输入手机号收到的短信验证码</h3><p>验证码已发送到账户绑定的手机号。</p></div><form id="smsForm"><input id="smsCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="六位短信验证码" aria-label="六位短信验证码" required><button class="button button-primary" type="submit">验证并登录</button><button class="quiet-button dark-text" type="button" id="resendButton">重发短信</button></form></section>
   <section class="verification-banner overview-only" id="pairingPanel" hidden><div><span class="card-kicker dark">设备配对验证</span><h3>输入受信任设备显示的配对码</h3><p>项目通过 APS 和 GSA 完成证明交换，不启动官方客户端。</p></div><form id="pairingForm"><input id="pairingCode" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="六位配对码" aria-label="六位配对码" required><button class="button button-primary" type="submit">发送配对证明</button></form></section>
   <section id="devices" class="devices-section"><div class="section-heading"><div><span class="section-kicker">已关联的设备</span><h2>我的设备 <span id="deviceCount">—</span></h2></div><button class="text-button" id="devicesButton" disabled>↻<span>刷新设备</span></button></div><div class="device-grid" id="deviceGrid"><div class="empty-state">正在读取设备列表…</div></div><div class="section-footnote"><span class="footnote-dot"></span><span id="deviceUpdate">设备列表与 Apple 账户同步</span></div></section>
