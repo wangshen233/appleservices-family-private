@@ -47,6 +47,10 @@ func loadStoreSAPBag(ctx context.Context, client *http.Client, guid string) (sto
 }
 
 func loadStoreSAPBagForAgent(ctx context.Context, client *http.Client, guid, agent string, preserveNative bool) (storeSAPBag, error) {
+	return loadStoreSAPBagForAgentMode(ctx, client, guid, agent, preserveNative, os.Getenv("APPLESERVICES_SKILL_MATCHED_BAG") == "1")
+}
+
+func loadStoreSAPBagForAgentMode(ctx context.Context, client *http.Client, guid, agent string, requireNative, preserveMatched bool) (storeSAPBag, error) {
 	query := url.Values{"ix": {"6"}, "guid": {guid}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, storeBagURL+"?"+query.Encode(), nil)
 	if err != nil {
@@ -70,7 +74,7 @@ func loadStoreSAPBagForAgent(ctx context.Context, client *http.Client, guid, age
 	if err != nil {
 		return storeSAPBag{}, err
 	}
-	if preserveNative || os.Getenv("APPLESERVICES_SKILL_MATCHED_BAG") == "1" {
+	if requireNative || preserveMatched {
 		var values map[string]any
 		if _, err := plist.Unmarshal(body, &values); err != nil {
 			return storeSAPBag{}, err
@@ -80,7 +84,7 @@ func loadStoreSAPBagForAgent(ctx context.Context, client *http.Client, guid, age
 			return storeSAPBag{}, err
 		}
 		u, _ := url.Parse(raw)
-		if preserveNative && (u.Hostname() != "auth.itunes.apple.com" || (u.Path != "/auth/v1/native" && u.Path != "/auth/v1/native/fast" && u.Path != "/auth/v1/native/fast/")) {
+		if requireNative && (u.Hostname() != "auth.itunes.apple.com" || (u.Path != "/auth/v1/native" && u.Path != "/auth/v1/native/fast" && u.Path != "/auth/v1/native/fast/")) {
 			return storeSAPBag{}, errors.New("bag did not return a supported native Store endpoint")
 		}
 		bag.AuthEndpoint = raw

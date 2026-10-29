@@ -88,6 +88,39 @@ type PurchaseTarget struct {
 	Period     string
 }
 
+// supported50GBTarget maps only recurring offers with an explicit
+// authorization path. Store prices use thousandths (99 cents is sent as
+// 990), while PurchaseTarget uses the currency's minor unit.
+func supported50GBTarget(target PurchaseTarget) (country, storePrice string, ok bool) {
+	if target.Bytes != 50*1024*1024*1024 || target.Period != "month" {
+		return "", "", false
+	}
+	switch {
+	case target.Currency == "CNY" && target.PriceMinor == 600:
+		return "CN", "6000", true
+	case target.Currency == "USD" && target.PriceMinor == 99:
+		return "US", "990", true
+	default:
+		return "", "", false
+	}
+}
+
+func supported50GBQuery(q url.Values) bool {
+	if q.Get("offerName") != "com.apple.icloud50GB_monthly" || q.Get("storagePlanInBytes") != "53687091200" || q.Get("salableAdamId") != storeSalableAdamID {
+		return false
+	}
+	for _, target := range []PurchaseTarget{
+		{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 600, Currency: "CNY", Period: "month"},
+		{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 99, Currency: "USD", Period: "month"},
+	} {
+		country, price, _ := supported50GBTarget(target)
+		if q.Get("cc") == country && q.Get("price") == price {
+			return true
+		}
+	}
+	return false
+}
+
 // ValidatePurchaseTarget performs the no-side-effect part of a purchase. It
 // refuses to continue unless Apple's plan response contains the exact target.
 func ValidatePurchaseTarget(info *StoragePlanInfo, target PurchaseTarget) error {
@@ -150,8 +183,11 @@ func validateNativeStorageConfirmation(q, original url.Values, session *storeSes
 			return &StorageError{Stage: "purchase-confirmation-binding"}
 		}
 	}
-	for key, expected := range map[string]string{"cc": "CN", "offerName": "com.apple.icloud50GB_monthly", "storagePlanInBytes": "53687091200", "price": "6000", "hasConfirmAutoRenew": "true"} {
-		if q.Get(key) != expected {
+	if !supported50GBQuery(original) || q.Get("hasConfirmAutoRenew") != "true" {
+		return &StorageError{Stage: "purchase-confirmation-offer"}
+	}
+	for _, key := range []string{"cc", "offerName", "storagePlanInBytes", "price", "salableAdamId"} {
+		if q.Get(key) != original.Get(key) {
 			return &StorageError{Stage: "purchase-confirmation-offer"}
 		}
 	}
@@ -268,7 +304,7 @@ func submitStoreBuyProduct(ctx context.Context, client *http.Client, offerURL st
 			return nil, &StorageError{Stage: "purchase-buy-offer"}
 		}
 	}
-	if q.Get("offerName") != "com.apple.icloud50GB_monthly" || q.Get("storagePlanInBytes") != "53687091200" || q.Get("cc") != "CN" || q.Get("price") != "6000" {
+	if !supported50GBQuery(q) {
 		return nil, &StorageError{Stage: "purchase-buy-offer"}
 	}
 	// The App Store purchase client posts the buy parameters as a plist to
@@ -1085,19 +1121,30 @@ func setStoreOrigin(req *http.Request, referer string) {
 // China 50 GB monthly iCloud+ offer. The App Store purchase client posts
 // these as a plist; only the native store session is required.
 func DirectStorageOfferURL(guid string) string {
+	u, _ := DirectStorageOfferURLForTarget(guid, PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 600, Currency: "CNY", Period: "month"})
+	return u
+}
+
+// DirectStorageOfferURLForTarget builds native buy parameters for one exact,
+// supported 50 GB offer. Arbitrary currencies and prices are rejected.
+func DirectStorageOfferURLForTarget(guid string, target PurchaseTarget) (string, error) {
+	country, price, ok := supported50GBTarget(target)
+	if !ok || guid == "" {
+		return "", &StorageError{Stage: "purchase-skill-offer"}
+	}
 	q := url.Values{
 		"appExtVrsId":        {"843583569"},
 		"appAdamId":          {"1581031638"},
-		"price":              {"6000"},
+		"price":              {price},
 		"pricingParameters":  {"STDQ"},
 		"productType":        {"A"},
 		"salableAdamId":      {"6449562876"},
 		"offerName":          {"com.apple.icloud50GB_monthly"},
 		"storagePlanInBytes": {"53687091200"},
-		"cc":                 {"CN"},
+		"cc":                 {country},
 		"guid":               {guid},
 	}
-	return storeBuyProductURL + "?" + q.Encode()
+	return storeBuyProductURL + "?" + q.Encode(), nil
 }
 
 // SubmitStorageBuyDirect posts the App Store purchase plist for the 50 GB

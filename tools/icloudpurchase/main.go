@@ -1,5 +1,5 @@
-// icloudpurchase submits only the explicitly confirmed CN 50GB/CNY 6 monthly
-// offer using an already accepted iCloud session, then verifies paid quota.
+// icloudpurchase submits only an explicitly confirmed, allowlisted 50 GB
+// monthly offer using an already accepted iCloud session, then verifies it.
 package main
 
 import (
@@ -24,6 +24,7 @@ func run() error {
 	acceptedFile := flag.String("accepted", "", "private accepted iCloud checkpoint")
 	journalFile := flag.String("journal", "", "new owner-only attempt journal; never replay an existing attempt")
 	confirm := flag.Bool("confirm-cn-50gb", false, "owner has explicitly authorized CN 50GB at CNY 6 per month")
+	confirmUS := flag.Bool("confirm-us-50gb", false, "owner has explicitly authorized US 50GB at USD 0.99 per month, plus applicable tax")
 	cancelAutoRenew := flag.Bool("cancel-auto-renew", false, "disable renewal for the existing iCloud+ subscription; service remains active until expiry")
 	storeCheck := flag.Bool("store-check-only", false, "check this Mac's native Store authentication without any purchase")
 	nativeStore := flag.Bool("native-store", false, "use this account Mac's authenticated native Store and exact returned confirmation")
@@ -52,7 +53,7 @@ func run() error {
 	if *storeRetries < 0 || *storeRetries > 3 {
 		return fmt.Errorf("Store authentication retries must be between 0 and 3")
 	}
-	if (!*confirm && !*cancelAutoRenew) || *dir == "" || *acceptedFile == "" || *journalFile == "" {
+	if ((!*confirm && !*confirmUS && !*cancelAutoRenew) || (*confirm && *confirmUS)) || *dir == "" || *acceptedFile == "" || *journalFile == "" {
 		return fmt.Errorf("explicit purchase confirmation, account, accepted checkpoint and new private journal required")
 	}
 	if _, err := os.Stat(*journalFile); !os.IsNotExist(err) {
@@ -137,6 +138,11 @@ func run() error {
 		return fmt.Errorf("existing paid capacity detected; purchase not submitted")
 	}
 	target := icloud.PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 600, Currency: "CNY", Period: "month"}
+	expectedStoreTerms := "290399"
+	if *confirmUS {
+		target = icloud.PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 99, Currency: "USD", Period: "month"}
+		expectedStoreTerms = "290571"
+	}
 	storageToken := saved.Tokens["com.apple.gs.icloud.storage.buy"]
 	var plans *icloud.StoragePlanInfo
 	if !*cancelAutoRenew {
@@ -147,7 +153,7 @@ func run() error {
 		if err := icloud.ValidatePurchaseTarget(plans, target); err != nil {
 			return err
 		}
-		fmt.Println("exact Apple offer verified: CN 50GB CNY 600 minor units/month")
+		fmt.Printf("exact Apple offer verified: 50GB %s %d minor units/month\n", target.Currency, target.PriceMinor)
 	}
 	journal, err := os.OpenFile(*journalFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
@@ -276,7 +282,7 @@ func run() error {
 		if *cancelAutoRenew {
 			return fmt.Errorf("no active iCloud+ subscription to cancel")
 		}
-		result, purchaseErr = commerce.SubmitSkillPurchase(ctx, plans, target, "290399")
+		result, purchaseErr = commerce.SubmitSkillPurchase(ctx, plans, target, expectedStoreTerms)
 	} else if *nativeStore {
 		result, purchaseErr = commerce.SubmitConfirmedStoragePurchase(ctx, plans, username, password, accepted.Session.DSID, accepted.ADSID, token, storageToken, headers, target)
 	} else {
@@ -311,7 +317,7 @@ func run() error {
 	}
 	completed := result != nil && result.State == "completed" && purchaseErr == nil && quotaErr == nil && updated.TotalBytes >= target.Bytes && updated.PaidBytes >= target.Bytes
 	if *claudeSkill {
-		completed = result != nil && result.State == "completed" && purchaseErr == nil && subscriptionErr == nil && subscription != nil && subscription.Verified50GB
+		completed = result != nil && result.State == "completed" && purchaseErr == nil && subscriptionErr == nil && subscription != nil && subscription.MatchesTarget(target)
 	}
 	status["purchase-completed-and-quota-verified"] = completed
 	if err := enc.Encode(status); err != nil {

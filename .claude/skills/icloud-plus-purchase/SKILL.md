@@ -46,6 +46,10 @@ go build -o bin/icloudpurchase.exe ./tools/icloudpurchase
 
 SAP 登录必须使用同一份 Store bag 返回的三元组：`authenticateAccount`、`sign-sap-setup` 和 `sign-sap-setup-cert`。不要无条件把 bag 的 legacy MZFinance 地址改写成 native/fast；需要诊断时使用 `-signed-store -matched-bag`，让认证地址和签名配置保持匹配。该模式仍使用物理 Store GUID，不能替换账号的 iCloud Mac/ADI 身份。
 
+Apple 已进入应用级 2FA challenge 后，同一个六位码必须在该 cookie 会话的纯路由重试中复用；204、无 `Location` 的 301/302、403/404/500/503 都没有消费验证码。验证码 provider 只读取一次，随后把该码保存在进程内，直到 Apple 返回应用响应、明确拒绝或会话结束；不能在每个路由响应后再次向用户要码。读取后的交接文件仍应立即删除，认证函数返回前清空内存副本。
+
+默认保持直连并显式禁用环境代理。如果用户明确授权临时代理，只把它接入 Store bag、SAP setup/certificate、authenticate 与后续 Store 请求的完整同一链路，不能出现 bag/签名直连而 authenticate 走代理的混合路径。本项目可用忽略目录中的 `.cache/store-proxy-10808.enabled` 临时启用 `127.0.0.1:10808`；购买和订阅/配额核验完成后立即删除该开关。代理认证仍不等于购买成功。
+
 `APPLESERVICES_SKILL_STORE_PROFILE=compact`、附加 `-signed-store` 或 `-appstore-profile` 是显式诊断选项，不是已验证的购买修复。当前目标曾在签名 App Store 对照收到空体 406/400，其他对照仍为通用空白/HTML 响应，均未取得商店令牌。不要把通用 HTTP 错误归因成密码或验证码错误，也不要重复同一失败实验而没有新证据。
 
 ## 关键前提

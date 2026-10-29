@@ -27,8 +27,8 @@ import (
 var assets embed.FS
 
 type Config struct {
-	Dir, Worker, Library, Python string
-	Port                         int
+	Dir, Worker, Library, Python, MacPushSetup string
+	Port                                       int
 }
 type Server struct {
 	config    Config
@@ -47,6 +47,9 @@ type Server struct {
 	// registryNote reports why the account list could not be loaded, so a
 	// failure is surfaced instead of silently presenting an empty list.
 	registryNote string
+	// provisionMacPush is replaceable only by package tests. Production uses
+	// the pinned native Mac APS bootstrap configured by cmd/dashboard.
+	provisionMacPush func(context.Context, string) error
 }
 type Status struct {
 	PID                  int       `json:"pid"`
@@ -98,6 +101,7 @@ func New(config Config) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{config: config, listener: listener, token: hex.EncodeToString(key)}
+	s.provisionMacPush = s.runMacPushProvisioner
 	if entries, err := loadRegistry(config.Dir, config.Dir); err != nil {
 		// Surfaced rather than swallowed: an unreadable registry previously
 		// made the panel look like it had no accounts at all.
@@ -107,7 +111,7 @@ func New(config Config) (*Server, error) {
 			s.accounts = append(s.accounts, &Account{ID: entry.ID, Name: entry.Name, AppleID: entry.AppleID, Dir: entry.Dir, CreatedAt: entry.CreatedAt})
 		}
 	}
-	s.http = &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 100 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+	s.http = &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 4 * time.Minute, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	return s, nil
 }
 
@@ -387,7 +391,11 @@ func (s *Server) callFor(ctx context.Context, dir, path string, body any, result
 	}
 	request.Header.Set("X-Control-Token", record.Token)
 	request.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 95 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	timeout := 95 * time.Second
+	if action, ok := body.(control.Action); ok && action.Action == "storage-skill-auth-file" {
+		timeout = 3*time.Minute + 5*time.Second
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)
 	if err != nil {
 		return errors.New("无法连接后台，请检查运行状态")
@@ -517,6 +525,12 @@ func (s *Server) startIn(ctx context.Context, dir string, creds credentials, acc
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return control.Result{Message: "无法写入本机状态目录"}
 	}
+	// A new account has its own device.json but no Mac APS certificate yet.
+	// The worker must not start until that account-private identity exists;
+	// otherwise it exits before Apple credential authentication begins.
+	if err := s.ensureMacPushState(ctx, dir); err != nil {
+		return control.Result{Message: "无法初始化该账号的独立 Mac 推送身份，请检查本机依赖后重试"}
+	}
 	output, err := os.OpenFile(filepath.Join(dir, "daemon.out.log"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return control.Result{Message: "无法创建运行日志"}
@@ -570,6 +584,8 @@ func lastProcessError(path string) string {
 			return "所选目录缺少有效设备身份，请选择已有账号，或通过添加账号建立身份"
 		case strings.Contains(line, "APPLESERVICES_APPLEID and APPLESERVICES_PASSWORD are required"):
 			return "请重新输入当前账号密码"
+		case strings.Contains(line, "client push certificate/key are unavailable"):
+			return "该账号的独立 Mac 推送身份尚未初始化，请重新连接"
 		default:
 			return "请检查该账号的本机诊断日志；设备身份仍保留"
 		}

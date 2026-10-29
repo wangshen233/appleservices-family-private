@@ -93,7 +93,7 @@ func New(dir string) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{dir: dir, listener: listener, Commands: make(chan Command), Record: Record{PID: os.Getpid(), URL: "http://" + listener.Addr().String(), Token: hex.EncodeToString(key)}}
-	s.http = &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 100 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+	s.http = &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 4 * time.Minute, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		listener.Close()
 		return nil, err
@@ -154,12 +154,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch action.Action {
-	case "code", "devices", "refresh", "validate-account", "allow", "deny", "submit-sms", "resend-sms", "submit-account-code", "storage-info", "storage-plan", "storage-authenticate", "storage-preview", "storage-purchase", "storage-probe", "storage-buy", "submit-pairing":
+	case "code", "devices", "refresh", "validate-account", "allow", "deny", "submit-sms", "resend-sms", "submit-account-code", "storage-info", "storage-plan", "storage-authenticate", "storage-skill-auth-local", "storage-skill-auth-file", "storage-skill-purchase-us", "storage-preview", "storage-purchase", "storage-probe", "storage-buy", "submit-pairing":
 	default:
 		http.Error(w, `{"message":"unknown action"}`, 400)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	timeout := 90 * time.Second
+	if action.Action == "storage-skill-auth-file" {
+		timeout = 3 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	command := Command{Action: action, Context: ctx, Reply: make(chan Result, 1)}
 	select {

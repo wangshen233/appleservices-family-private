@@ -3,6 +3,7 @@ package appleservices
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/Laky-64/appleservices/icloud"
 )
@@ -48,6 +49,71 @@ func (l *Login) CheckStoragePurchaseSession(ctx context.Context, code string) (*
 	}
 	l.storeCommerce = session
 	return &icloud.StoreAuthenticationInfo{Ready: true}, nil
+}
+
+// CheckSkillStoragePurchaseSession follows one matched Apple Store bag and
+// retains the same cookie session across password and Store 2FA. The provider
+// is called only after Apple requests a verification code.
+func (l *Login) CheckSkillStoragePurchaseSession(ctx context.Context, codeProvider func() (string, error)) (*icloud.StoreAuthenticationInfo, error) {
+	if l.needsTwoFactor || l.client == nil {
+		return nil, errors.New("appleservices: complete iCloud login before Store authentication")
+	}
+	if l.storeCommerce.MatchesAccount(l.client.DSID) {
+		return &icloud.StoreAuthenticationInfo{Ready: true}, nil
+	}
+	headers, err := l.anisette.Headers()
+	if err != nil {
+		return nil, errors.New("appleservices: Store anisette generation failed")
+	}
+	session, err := icloud.AuthenticateMatchedSkillStore(ctx, l.creds.AppleID, l.creds.Password, headers, codeProvider)
+	if err != nil {
+		return nil, err
+	}
+	if !session.MatchesAccount(l.client.DSID) {
+		return nil, errors.New("appleservices: Store account binding failed")
+	}
+	l.storeCommerce = session
+	return &icloud.StoreAuthenticationInfo{Ready: true}, nil
+}
+
+// SubmitSkillStoragePurchase submits one exact allowlisted offer, then
+// verifies both Apple's subscription detail and a fresh paid quota read.
+func (l *Login) SubmitSkillStoragePurchase(ctx context.Context, target PurchaseTarget, expectedTerms string) (*PurchaseResult, error) {
+	if !l.storeCommerce.MatchesAccount(l.client.DSID) {
+		return nil, errors.New("appleservices: Store session is unavailable")
+	}
+	before, err := l.storeCommerce.ReadSkillSubscription(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if before.Present {
+		return nil, errors.New("appleservices: an iCloud+ subscription is already active")
+	}
+	plans, err := l.StoragePlanInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result, err := l.storeCommerce.SubmitSkillPurchase(ctx, plans, target, expectedTerms)
+	if err != nil || result == nil || result.State != "completed" {
+		return result, err
+	}
+	subscription, err := l.storeCommerce.ReadSkillSubscription(ctx)
+	if err != nil || !subscription.MatchesTarget(target) {
+		return result, errors.New("appleservices: purchase returned but subscription verification is incomplete")
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		quota, quotaErr := l.StorageInfo(ctx)
+		if quotaErr == nil && quota.TotalBytes >= target.Bytes && quota.PaidBytes >= target.Bytes {
+			result.QuotaVerified = true
+			return result, nil
+		}
+		select {
+		case <-ctx.Done():
+			return result, errors.New("appleservices: purchase returned but quota verification timed out")
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return result, errors.New("appleservices: purchase returned but paid quota is not active")
 }
 
 // StorageInfo continues from this project's verified delegate session. It does

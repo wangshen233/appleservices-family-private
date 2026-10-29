@@ -94,6 +94,19 @@ func skillHTTPTransport() http.RoundTripper {
 	return transport
 }
 
+func skillMatchedHTTPTransport() http.RoundTripper {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	// Keep the established Store TLS fingerprint together with the matched
+	// endpoint and exact signed XML wire instead of splitting them across
+	// process-global diagnostic switches.
+	transport.TLSClientConfig = &tls.Config{
+		MinVersion:       tls.VersionTLS12,
+		CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384, tls.CurveP521},
+	}
+	return transport
+}
+
 // The successful standalone client used this XML layout and Go 1.21 TLS
 // defaults. Keep this opt-in comparison separate from the standard encoder.
 func skillReferenceLoginBody(appleID, password, guid string) []byte {
@@ -121,13 +134,41 @@ func AuthenticateSkillStore(ctx context.Context, appleID, password string, codeP
 // AuthenticateSignedSkillStore keeps the physical Store identity while testing
 // the signed native endpoint returned by Apple's current App Store bag.
 func AuthenticateSignedSkillStore(ctx context.Context, appleID, password string, headers map[string]string, appStoreProfile bool, codeProvider func() (string, error)) (*StoreCommerceSession, error) {
+	return authenticateSignedSkillStoreMode(ctx, appleID, password, headers, appStoreProfile, os.Getenv("APPLESERVICES_SKILL_MATCHED_BAG") == "1", skillHTTPTransport(), codeProvider)
+}
+
+// AuthenticateMatchedSkillStore preserves the authenticate/setup/certificate
+// tuple returned by one Apple Store bag without process-global diagnostics.
+func AuthenticateMatchedSkillStore(ctx context.Context, appleID, password string, headers map[string]string, codeProvider func() (string, error)) (*StoreCommerceSession, error) {
+	session, err := authenticateSignedSkillStoreMode(ctx, appleID, password, headers, false, true, skillMatchedHTTPTransport(), codeProvider)
+	if err == nil || !storeRoutingFailure(err) || os.Getenv("APPLESERVICES_SKILL_HTTP_PYTHON") == "1" {
+		return session, err
+	}
+	fmt.Println("Apple Store Go transport reached only routing responses; retrying once with direct Python TLS transport")
+	return authenticateSignedSkillStoreMode(ctx, appleID, password, headers, false, true, skillPythonTransport{}, codeProvider)
+}
+
+func storeRoutingFailure(err error) bool {
+	var failure *StorageError
+	if !errors.As(err, &failure) || failure.Stage != "purchase-store-authentication" {
+		return false
+	}
+	switch failure.HTTPStatus {
+	case 204, 301, 302, 403, 404, 500, 503:
+		return true
+	default:
+		return false
+	}
+}
+
+func authenticateSignedSkillStoreMode(ctx context.Context, appleID, password string, headers map[string]string, appStoreProfile, matchedBag bool, transport http.RoundTripper, codeProvider func() (string, error)) (*StoreCommerceSession, error) {
 	guid, hardware, err := storeHardwareIdentity()
 	if err != nil || isVirtualInterface("", hardware) {
 		return nil, &StorageError{Stage: "purchase-store-physical-hardware"}
 	}
-	client := &http.Client{Jar: mustCookieJar(), Transport: skillHTTPTransport(), Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Jar: mustCookieJar(), Transport: transport, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	agent := skillAuthenticationAgent()
-	if os.Getenv("APPLESERVICES_SKILL_MATCHED_BAG") == "1" {
+	if matchedBag {
 		agent = storeSAPUserAgent
 	}
 	if appStoreProfile {
@@ -135,7 +176,11 @@ func AuthenticateSignedSkillStore(ctx context.Context, appleID, password string,
 	} else {
 		headers = nil
 	}
-	bag, err := loadStoreSAPBagForAgent(ctx, client, guid, agent, appStoreProfile)
+	// A matched-bag login must preserve authenticateAccount together with the
+	// setup and certificate endpoints from that same bag. Passing only the
+	// matched UA still lets the lower layer normalize authenticateAccount to
+	// native/fast, recreating the exact tuple mismatch fixed by 1407168.
+	bag, err := loadStoreSAPBagForAgentMode(ctx, client, guid, agent, appStoreProfile, matchedBag)
 	if err != nil {
 		client.CloseIdleConnections()
 		return nil, &StorageError{Stage: "purchase-store-bag"}
@@ -152,7 +197,7 @@ func AuthenticateSignedSkillStore(ctx context.Context, appleID, password string,
 		return nil, &StorageError{Stage: "purchase-store-sap"}
 	}
 	defer signer.Close()
-	return authenticateSkillStoreConfigured(ctx, client, bag.AuthEndpoint, guid, appleID, password, agent, headers, signer, codeProvider)
+	return authenticateSkillStoreConfiguredMode(ctx, client, bag.AuthEndpoint, guid, appleID, password, agent, headers, signer, matchedBag, codeProvider)
 }
 
 func authenticateSkillStoreClient(ctx context.Context, client *http.Client, guid, appleID, password string, codeProvider func() (string, error)) (*StoreCommerceSession, error) {
@@ -160,6 +205,10 @@ func authenticateSkillStoreClient(ctx context.Context, client *http.Client, guid
 }
 
 func authenticateSkillStoreConfigured(ctx context.Context, client *http.Client, endpoint, guid, appleID, password, agent string, headers map[string]string, signer sap.ActionSigner, codeProvider func() (string, error)) (*StoreCommerceSession, error) {
+	return authenticateSkillStoreConfiguredMode(ctx, client, endpoint, guid, appleID, password, agent, headers, signer, false, codeProvider)
+}
+
+func authenticateSkillStoreConfiguredMode(ctx context.Context, client *http.Client, endpoint, guid, appleID, password, agent string, headers map[string]string, signer sap.ActionSigner, referenceWire bool, codeProvider func() (string, error)) (*StoreCommerceSession, error) {
 	maxAttempts := 20
 	if raw := os.Getenv("APPLESERVICES_SKILL_AUTH_ATTEMPTS"); raw != "" {
 		limit, err := strconv.Atoi(raw)
@@ -169,20 +218,23 @@ func authenticateSkillStoreConfigured(ctx context.Context, client *http.Client, 
 		maxAttempts = limit
 	}
 	needsCode := false
+	challengeCode := ""
+	defer func() { challengeCode = "" }()
 	for attempt, redirects := 1, 0; attempt <= maxAttempts; attempt++ {
-		code := ""
+		code := challengeCode
 		var err error
-		if codeProvider != nil && needsCode {
-			code, err = codeProvider()
-			if err != nil || len(code) != 6 || strings.IndexFunc(code, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+		if codeProvider != nil && needsCode && challengeCode == "" {
+			challengeCode, err = codeProvider()
+			if err != nil || len(challengeCode) != 6 || strings.IndexFunc(challengeCode, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
 				return nil, &StorageError{Stage: "purchase-store-code"}
 			}
+			code = challengeCode
 		}
 		body, err := plistLoginAttemptBody(appleID, password+code, guid, 1)
 		if err != nil {
 			return nil, &StorageError{Stage: "purchase-store-request"}
 		}
-		if os.Getenv("APPLESERVICES_SKILL_REFERENCE_WIRE") == "1" {
+		if referenceWire || os.Getenv("APPLESERVICES_SKILL_REFERENCE_WIRE") == "1" {
 			body = skillReferenceLoginBody(appleID, password+code, guid)
 		}
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
@@ -428,10 +480,14 @@ func (s *StoreCommerceSession) SubmitSkillPurchase(ctx context.Context, info *St
 	if err := ValidatePurchaseTarget(info, target); err != nil {
 		return nil, err
 	}
-	if target.Bytes != 50*1024*1024*1024 || target.PriceMinor != 600 || target.Currency != "CNY" || target.Period != "month" {
+	if _, _, ok := supported50GBTarget(target); !ok {
 		return nil, &StorageError{Stage: "purchase-skill-offer"}
 	}
-	u, _ := url.Parse(DirectStorageOfferURL(s.identity.GUID))
+	rawOffer, err := DirectStorageOfferURLForTarget(s.identity.GUID, target)
+	if err != nil {
+		return nil, err
+	}
+	u, _ := url.Parse(rawOffer)
 	q := u.Query()
 	for k, v := range map[string]string{"hasAskedToFulfillPreorder": "true", "hasDoneAgeCheck": "true", "buyWithoutAuthorization": "true", "needDiv": "0", "origPage": "Software-1581031638", "origPageLocation": "Buy"} {
 		q.Set(k, v)
@@ -601,6 +657,27 @@ type SkillSubscriptionInfo struct {
 	Verified50GB   bool   `json:"verified_50gb"`
 }
 
+// MatchesTarget requires the storage amount and Store-formatted paid price to
+// match the exact authorized offer.
+func (info *SkillSubscriptionInfo) MatchesTarget(target PurchaseTarget) bool {
+	if info == nil {
+		return false
+	}
+	amount := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(info.StorageAmount, "\u00a0", ""), " ", ""))
+	if amount != "50GB" {
+		return false
+	}
+	price := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(info.PaidPrice, "\u00a0", ""), " ", ""))
+	switch {
+	case target.Currency == "CNY" && target.PriceMinor == 600:
+		return price == "¥6.00" || price == "￥6.00" || price == "CNY6.00"
+	case target.Currency == "USD" && target.PriceMinor == 99:
+		return price == "$0.99" || price == "US$0.99" || price == "USD0.99"
+	default:
+		return false
+	}
+}
+
 func (s *StoreCommerceSession) ReadSkillSubscription(ctx context.Context) (*SkillSubscriptionInfo, error) {
 	data, _, err := s.skillRequest(ctx, http.MethodGet, "https://speedysub.itunes.apple.com/subscription/v3/manage/list", skillStoreAgent, "", nil)
 	if err != nil {
@@ -639,8 +716,8 @@ func (s *StoreCommerceSession) ReadSkillSubscription(ctx context.Context) (*Skil
 		info.PaidPrice, _ = plan["paidPrice"].(string)
 		info.PlanName, _ = plan["displayName"].(string)
 		info.AutoRenew, _ = findSkillValue(detail, "isAutoRenewEnabled").(bool)
-		amount := strings.ReplaceAll(strings.ReplaceAll(info.StorageAmount, "\u00a0", ""), " ", "")
-		info.Verified50GB = strings.ToUpper(amount) == "50GB" && (info.PaidPrice == "\u00a56.00" || info.PaidPrice == "\uffe56.00" || info.PaidPrice == "CNY 6.00")
+		info.Verified50GB = info.MatchesTarget(PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 600, Currency: "CNY", Period: "month"}) ||
+			info.MatchesTarget(PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 99, Currency: "USD", Period: "month"})
 		return info, nil
 	}
 	return &SkillSubscriptionInfo{}, nil

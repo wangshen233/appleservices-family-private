@@ -574,6 +574,71 @@ func run() (runErr error) {
 			}
 			return control.Result{OK: true, Message: "Apple Store 认证已通过，购买会话已保留；未提交购买", StoreAuthentication: info}
 		}
+		if action == "storage-skill-auth-local" {
+			checker, ok := active.(interface {
+				CheckSkillStoragePurchaseSession(context.Context, func() (string, error)) (*icloud.StoreAuthenticationInfo, error)
+			})
+			if !ok {
+				return control.Result{Message: "后台版本不支持匹配 Store bag 的认证", Stage: "worker"}
+			}
+			queryCtx, done := context.WithTimeout(actionCtx, 3*time.Minute)
+			defer done()
+			info, err := checker.CheckSkillStoragePurchaseSession(queryCtx, func() (string, error) {
+				return generateCode(queryCtx)
+			})
+			if err != nil {
+				result := control.Result{Message: "Store 会话认证未完成，未提交购买", Stage: "purchase-store-authentication"}
+				var failure *icloud.StorageError
+				if errors.As(err, &failure) {
+					result.Stage, result.HTTPStatus, result.AppleCode, result.AppleHint = failure.Stage, failure.HTTPStatus, failure.AppleCode, failure.Hint
+				}
+				return result
+			}
+			return control.Result{OK: true, Message: "匹配 Store bag 的认证已通过；未提交购买", StoreAuthentication: info}
+		}
+		if action == "storage-skill-auth-file" {
+			checker, ok := active.(interface {
+				CheckSkillStoragePurchaseSession(context.Context, func() (string, error)) (*icloud.StoreAuthenticationInfo, error)
+			})
+			if !ok {
+				return control.Result{Message: "后台版本不支持实时 Store 验证码交接", Stage: "worker"}
+			}
+			queryCtx, done := context.WithTimeout(actionCtx, 3*time.Minute)
+			defer done()
+			info, err := checker.CheckSkillStoragePurchaseSession(queryCtx, func() (string, error) {
+				return waitForFreshStoreCode(queryCtx, *dir)
+			})
+			if err != nil {
+				result := control.Result{Message: "Store 会话认证未完成，未提交购买", Stage: "purchase-store-authentication"}
+				var failure *icloud.StorageError
+				if errors.As(err, &failure) {
+					result.Stage, result.HTTPStatus, result.AppleCode, result.AppleHint = failure.Stage, failure.HTTPStatus, failure.AppleCode, failure.Hint
+				}
+				return result
+			}
+			return control.Result{OK: true, Message: "实时验证码已在同一 Store 会话中通过；未提交购买", StoreAuthentication: info}
+		}
+		if action == "storage-skill-purchase-us" {
+			buyer, ok := active.(interface {
+				SubmitSkillStoragePurchase(context.Context, appleservices.PurchaseTarget, string) (*appleservices.PurchaseResult, error)
+			})
+			if !ok {
+				return control.Result{Message: "后台版本不支持美区 iCloud+ 购买", Stage: "worker"}
+			}
+			queryCtx, done := context.WithTimeout(actionCtx, 90*time.Second)
+			defer done()
+			target := appleservices.PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 99, Currency: "USD", Period: "month"}
+			purchase, err := buyer.SubmitSkillStoragePurchase(queryCtx, target, "290571")
+			if err != nil {
+				result := control.Result{Message: "美区购买或核验未完成；不得自动重试", Stage: "purchase"}
+				var failure *icloud.StorageError
+				if errors.As(err, &failure) {
+					result.Stage, result.HTTPStatus, result.AppleCode, result.AppleHint = failure.Stage, failure.HTTPStatus, failure.AppleCode, failure.Hint
+				}
+				return result
+			}
+			return control.Result{OK: true, Purchase: purchase, Message: "美区 50GB 订阅和付费配额均已核验", Stage: "purchase-completed"}
+		}
 		if action == "storage-info" {
 			reader, ok := active.(interface {
 				StorageInfo(context.Context) (*appleservices.StorageInfo, error)

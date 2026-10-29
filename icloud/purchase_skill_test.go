@@ -124,3 +124,86 @@ func TestSkillAuthenticationAppendsCodeOnlyAfterAppleChallenge(t *testing.T) {
 		t.Fatalf("incorrect challenge continuation: %v", err)
 	}
 }
+
+func TestMatchedSkillAuthenticationSignsOrderedReferenceWire(t *testing.T) {
+	calls := 0
+	signer := &testStoreSigner{}
+	client := &http.Client{Transport: testStoreTransport(func(req *http.Request) (*http.Response, error) {
+		calls++
+		body, _ := io.ReadAll(req.Body)
+		if !bytes.Equal(body, signer.body) {
+			t.Fatal("matched request signature did not cover the exact transmitted XML")
+		}
+		wire := string(body)
+		if strings.Index(wire, "<key>appleId</key>") > strings.Index(wire, "<key>attempt</key>") ||
+			strings.Index(wire, "<key>attempt</key>") > strings.Index(wire, "<key>guid</key>") ||
+			strings.Index(wire, "<key>guid</key>") > strings.Index(wire, "<key>password</key>") {
+			t.Fatal("matched request did not preserve the verified XML field order")
+		}
+		want := "<string>test-password</string>"
+		response := `<plist><dict><key>customerMessage</key><string>MZFinance.BadLogin.Configurator_message</string></dict></plist>`
+		header := http.Header{}
+		if calls == 2 {
+			want = "<string>test-password123456</string>"
+			response = `<plist><dict><key>dsPersonId</key><string>123</string><key>passwordToken</key><string>test-token</string></dict></plist>`
+			header.Set("X-Set-Apple-Store-Front", "143465")
+		}
+		if !strings.Contains(wire, want) {
+			t.Fatal("matched reference wire changed the challenge password")
+		}
+		return &http.Response{StatusCode: 200, Header: header, Request: req, Body: io.NopCloser(strings.NewReader(response))}, nil
+	})}
+	session, err := authenticateSkillStoreConfiguredMode(context.Background(), client, "https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate", "TEST-GUID", "owner@example.test", "test-password", storeSAPUserAgent, nil, signer, true, func() (string, error) { return "123456", nil })
+	if err != nil || calls != 2 || !session.MatchesAccount("123") {
+		t.Fatalf("matched reference authentication failed: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestSkillAuthenticationReusesOneCodeAcrossRoutingResponses(t *testing.T) {
+	calls, providerCalls := 0, 0
+	client := &http.Client{Transport: testStoreTransport(func(req *http.Request) (*http.Response, error) {
+		calls++
+		body, _ := io.ReadAll(req.Body)
+		var fields map[string]any
+		plist.Unmarshal(body, &fields)
+		response := `<plist><dict><key>customerMessage</key><string>MZFinance.BadLogin.Configurator_message</string></dict></plist>`
+		status := 200
+		header := http.Header{}
+		switch calls {
+		case 1:
+			if fields["password"] != "test-password" {
+				t.Fatal("code was sent before the Store challenge")
+			}
+		case 2, 3:
+			if fields["password"] != "test-password123456" {
+				t.Fatal("challenge code was not reused across routing responses")
+			}
+			status, response = 301, ""
+		case 4:
+			if fields["password"] != "test-password123456" {
+				t.Fatal("successful retry omitted the retained challenge code")
+			}
+			response = `<plist><dict><key>dsPersonId</key><string>123</string><key>passwordToken</key><string>test-token</string></dict></plist>`
+			header.Set("X-Set-Apple-Store-Front", "143465")
+		}
+		return &http.Response{StatusCode: status, Header: header, Request: req, Body: io.NopCloser(strings.NewReader(response))}, nil
+	})}
+	session, err := authenticateSkillStoreClient(context.Background(), client, "TEST-GUID", "owner@example.test", "test-password", func() (string, error) {
+		providerCalls++
+		return "123456", nil
+	})
+	if err != nil || calls != 4 || providerCalls != 1 || !session.MatchesAccount("123") {
+		t.Fatalf("challenge code was not retained: calls=%d provider=%d err=%v", calls, providerCalls, err)
+	}
+}
+
+func TestSkillSubscriptionMatchesUS50GB(t *testing.T) {
+	info := &SkillSubscriptionInfo{StorageAmount: "50 GB", PaidPrice: "$0.99"}
+	target := PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 99, Currency: "USD", Period: "month"}
+	if !info.MatchesTarget(target) {
+		t.Fatal("US 50 GB subscription was not matched")
+	}
+	if info.MatchesTarget(PurchaseTarget{Bytes: target.Bytes, PriceMinor: 600, Currency: "CNY", Period: "month"}) {
+		t.Fatal("US subscription matched the CN authorization")
+	}
+}

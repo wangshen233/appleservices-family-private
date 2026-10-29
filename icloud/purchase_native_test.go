@@ -126,3 +126,22 @@ func TestNativeStorageConfirmationRejectsChangedOfferOrAccount(t *testing.T) {
 		t.Fatal("duplicate parameter accepted")
 	}
 }
+
+func TestNativeUSStorageConfirmationBinding(t *testing.T) {
+	target := PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 99, Currency: "USD", Period: "month"}
+	raw, err := DirectStorageOfferURLForTarget("TEST-GUID", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, _ := url.Parse(raw)
+	confirmation := original.Query()
+	confirmation.Set("hasConfirmAutoRenew", "true")
+	session := &storeSession{DSID: "123", PasswordToken: "store-token", GUID: "TEST-GUID"}
+	if err := validateNativeStorageConfirmation(confirmation, original.Query(), session); err != nil {
+		t.Fatal(err)
+	}
+	confirmation.Set("price", "999")
+	if err := validateNativeStorageConfirmation(confirmation, original.Query(), session); err == nil {
+		t.Fatal("changed US price was accepted")
+	}
+}
