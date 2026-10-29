@@ -46,6 +46,15 @@ For execution in this repository, read [references/windows-runbook.md](reference
    - Inspect a refused 2FA response privately before interpreting an HTTP code. If Apple explicitly returns `tooManyCodesSent=true` / `-22981`, stop requesting SMS; do not guess a recovery time. `noTrustedDevices=true` does not authorize replacing SMS with a locally generated device code.
 7. **Separate results.** Report independent evidence for GSA, terms, NAC, delegate, quota, and worker integration. A standalone probe can succeed while a dashboard worker still fails because its cached session, registration, serial override, cookie, or headers differ.
 
+## WebUI completion path
+
+For this repository, users who start from the WebUI must be able to finish there. After password/2FA succeeds, require the account-bound GSA checkpoint to exist before any delegate request. If iCloud is not yet accepted, the dashboard exposes the following account-scoped actions even when the worker has stopped:
+
+- `activation-plan`: read-only; returns the exact region, iCloud version, media-service version, and official terms links from Apple's current setup page.
+- `activation-accept`: requires the user to confirm the exact tuple shown by `activation-plan`; it accepts only that version, generates NAC from the selected account's own Mac profile, submits Mac v2 delegate, verifies a real MME token with a quota read, and installs the accepted checkpoint.
+
+The UI must show the activation card only for an unaccepted account with a valid saved GSA PET. A completed checkpoint hides the card and enables normal storage/family actions. Never run `activation-accept` merely because a worker failed, never reuse another account's NAC runtime data, and never purchase a plan as part of activation.
+
 ## Repository integration hints
 
 For this project, the useful diagnostic variables are:

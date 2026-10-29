@@ -95,6 +95,7 @@ type view struct {
 	StoragePlanCheckedAt string                  `json:"storage_plan_checked_at,omitempty"`
 	StoragePlanStale     bool                    `json:"storage_plan_stale"`
 	HideMyEmailAvailable bool                    `json:"hide_my_email_available"`
+	ActivationReady      bool                    `json:"activation_ready"`
 }
 type credentials struct {
 	AppleID   string `json:"apple_id"`
@@ -777,6 +778,7 @@ func (s *Server) snapshotFor(ctx context.Context, id string) view {
 		result.Selected = account.ID
 		result.LoginAccount = account.AppleID
 		result.ICloudActivated = acceptedCheckpointReady(account.Dir, account.AppleID)
+		result.ActivationReady = !result.ICloudActivated && verifiedGSACheckpointReady(account.Dir, account.AppleID)
 		if family, checkedAt, stale := readFamilyCache(account); family != nil {
 			s.resolveCachedFamilyOrganizer(account, family)
 			result.Family = family
@@ -1142,6 +1144,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			var result control.Result
 			if selected != nil && action.Action == "family-remove-member" {
 				result = s.removeFamilyMember(r.Context(), selected, action.Code)
+				json.NewEncoder(w).Encode(result)
+				return
+			}
+			if selected != nil && (action.Action == "activation-plan" || action.Action == "activation-accept") {
+				result = s.activationAction(r.Context(), selected, action.Action == "activation-accept", action.Code)
 				json.NewEncoder(w).Encode(result)
 				return
 			}

@@ -71,6 +71,17 @@ type Result struct {
 	Family              *FamilyInfo                     `json:"family,omitempty"`
 	HideMyEmail         *icloud.HideMyEmailInfo         `json:"hide_my_email,omitempty"`
 	HMECandidate        string                          `json:"hme_candidate,omitempty"`
+	Activation          *ActivationInfo                 `json:"activation,omitempty"`
+}
+
+type ActivationInfo struct {
+	Required       bool   `json:"required"`
+	Completed      bool   `json:"completed,omitempty"`
+	Region         string `json:"region,omitempty"`
+	ICloudVersion  string `json:"icloud_version,omitempty"`
+	MediaVersion   string `json:"media_version,omitempty"`
+	ICloudTermsURL string `json:"icloud_terms_url,omitempty"`
+	MediaTermsURL  string `json:"media_terms_url,omitempty"`
 }
 
 // FamilyInfo is the redacted, UI-safe state returned by the native FamilyKit
