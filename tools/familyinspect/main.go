@@ -148,6 +148,31 @@ func boolValue(v any) bool {
 	return b
 }
 
+func familyMemberAppleID(member map[string]any) string {
+	if value := stringValue(member["appleId"]); value != "" {
+		return value
+	}
+	return stringValue(member["member-apple-id"])
+}
+
+func summarizeFamilyMembers(members []any) (organizers, children, me int, selfOrganizer bool, selfMember map[string]any) {
+	for _, raw := range members {
+		member, _ := raw.(map[string]any)
+		if boolValue(member["member-is-organizer"]) {
+			organizers++
+		}
+		if boolValue(member["member-is-child-account"]) {
+			children++
+		}
+		if boolValue(member["is-me"]) {
+			me++
+			selfMember = member
+			selfOrganizer = boolValue(member["member-is-organizer"])
+		}
+	}
+	return
+}
+
 func integerValue(v any) int64 {
 	switch x := v.(type) {
 	case int:
@@ -393,6 +418,7 @@ func run() error {
 	shareICloudStorage := flag.Bool("share-icloud-storage", false, "enable this organizer's current iCloud+ plan for the bound family")
 	joinSharedStorage := flag.Bool("join-shared-storage", false, "switch this non-organizer family member to the available shared iCloud+ plan")
 	addPoolMemberDir := flag.String("add-pool-member-dir", "", "add one independently authenticated pool account through Apple's PET in-person flow")
+	removePoolMemberDir := flag.String("remove-pool-member-dir", "", "remove one current non-child pool member from this organizer's family")
 	targetPasswordEnv := flag.Bool("target-password-env", false, "use and immediately clear APPLESERVICES_TARGET_PASSWORD as Apple's rawFallback credential")
 	inviteAccountDir := flag.String("invite-account-dir", "", "target pool account directory for a new organizer invitation")
 	inviteOut := flag.String("invite-out", "", "new private invite checkpoint for the target account")
@@ -426,10 +452,13 @@ func run() error {
 	if *acceptInvite != "" && (*inviteAccountDir != "" || *createFamily || *shareICloudStorage) {
 		return errors.New("invite acceptance must be a separate target-account operation")
 	}
-	if *addPoolMemberDir != "" && (*inviteAccountDir != "" || *acceptInvite != "" || *createFamily || *shareICloudStorage) {
+	if *addPoolMemberDir != "" && (*removePoolMemberDir != "" || *inviteAccountDir != "" || *acceptInvite != "" || *createFamily || *shareICloudStorage) {
 		return errors.New("pool member addition must be a separate verified operation")
 	}
-	if *joinSharedStorage && (*inviteAccountDir != "" || *acceptInvite != "" || *addPoolMemberDir != "") {
+	if *removePoolMemberDir != "" && (*inviteAccountDir != "" || *acceptInvite != "" || *createFamily || *shareICloudStorage || *joinSharedStorage) {
+		return errors.New("pool member removal must be a separate verified operation")
+	}
+	if *joinSharedStorage && (*inviteAccountDir != "" || *acceptInvite != "" || *addPoolMemberDir != "" || *removePoolMemberDir != "") {
 		return errors.New("joining shared storage must be a separate current-member operation")
 	}
 	if *targetPasswordEnv && *addPoolMemberDir == "" {
@@ -1005,23 +1034,7 @@ func run() error {
 	members, _ := details["family-members"].([]any)
 	invites, _ := details["family-invitations"].([]any)
 	pending, _ := details["pending-members"].([]any)
-	organizers, children, me := 0, 0, 0
-	selfOrganizer := false
-	var selfMember map[string]any
-	for _, raw := range members {
-		member, _ := raw.(map[string]any)
-		if boolValue(member["member-is-organizer"]) {
-			organizers++
-		}
-		if boolValue(member["member-is-child-account"]) {
-			children++
-		}
-		if boolValue(member["is-me"]) {
-			me++
-			selfMember = member
-			selfOrganizer = boolValue(member["member-is-organizer"])
-		}
-	}
+	organizers, children, me, selfOrganizer, selfMember := summarizeFamilyMembers(members)
 	if *createFamily && (len(members) != 1 || organizers != 1 || me != 1) {
 		return errors.New("family creation response was not confirmed by organizer membership")
 	}
@@ -1054,6 +1067,112 @@ func run() error {
 			return errors.New("family membership succeeded but shared iCloud+ is not active for the target")
 		}
 		fmt.Println("family invitation acceptance verified; target-member=true shared-icloud-storage=true purchase-sharing-enabled=false")
+	}
+	if *removePoolMemberDir != "" {
+		if organizers != 1 || me != 1 || !selfOrganizer || !boolValue(details["is-member-of-family"]) {
+			return errors.New("pool member removal requires the current self organizer")
+		}
+		var target appleservices.Session
+		targetData, targetErr := os.ReadFile(filepath.Join(*removePoolMemberDir, "session.json"))
+		if targetErr != nil || json.Unmarshal(targetData, &target) != nil || target.AppleID == "" || strings.EqualFold(target.AppleID, saved.AppleID) {
+			return errors.New("target pool account session is unavailable or invalid")
+		}
+		targetDSID := ""
+		targetMatches := 0
+		for _, raw := range members {
+			member, _ := raw.(map[string]any)
+			if !strings.EqualFold(familyMemberAppleID(member), target.AppleID) {
+				continue
+			}
+			targetMatches++
+			if boolValue(member["is-me"]) || boolValue(member["member-is-organizer"]) {
+				return errors.New("refusing to remove self or organizer")
+			}
+			if boolValue(member["member-is-child-account"]) {
+				return errors.New("child-account removal is unsupported")
+			}
+			targetDSID = numericIDValue(member["member-dsid"])
+		}
+		if targetMatches != 1 || targetDSID == "" {
+			return errors.New("target pool member is not uniquely bound to the current family")
+		}
+		removeURL, removeErr := appleEndpoint(stringValue(urls["removeFromFamily"]))
+		if removeErr != nil {
+			return errors.New("Apple bag did not return a valid family removal endpoint")
+		}
+		removeBody, encodeErr := plist.Marshal(map[string]any{"member-dsid": targetDSID}, plist.XMLFormat)
+		targetDSID = ""
+		if encodeErr != nil {
+			return errors.New("cannot encode bound family removal request")
+		}
+		removeRequest, requestErr := newFamilyRequest(removeURL.String(), false)
+		if requestErr != nil {
+			return requestErr
+		}
+		removeRequest.Method = http.MethodPost
+		removeRequest.Body = io.NopCloser(bytes.NewReader(removeBody))
+		removeRequest.ContentLength = int64(len(removeBody))
+		removeRequest.Header.Set("Content-Type", "application/x-plist")
+		removeRequest.Header.Set("Accept", "application/json, text/plist, application/x-plist")
+		removeResponse, removeRequestErr := apiClient.Do(removeRequest)
+		for index := range removeBody {
+			removeBody[index] = 0
+		}
+		if removeRequestErr == nil {
+			removeData, readErr := io.ReadAll(io.LimitReader(removeResponse.Body, (2<<20)+1))
+			removeResponse.Body.Close()
+			if readErr != nil || len(removeData) > 2<<20 || removeResponse.StatusCode != http.StatusOK {
+				return fmt.Errorf("family member removal returned HTTP %d", removeResponse.StatusCode)
+			}
+			if len(bytes.TrimSpace(removeData)) > 0 {
+				removed, decodeErr := decodeObject(removeData)
+				if decodeErr == nil && familyResponseError(removed) {
+					return errors.New("Apple returned an application error for family member removal")
+				}
+			}
+		}
+		var verified map[string]any
+		confirmed := false
+		for attempt := 0; attempt < 4 && !confirmed; attempt++ {
+			verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 12*time.Second)
+			verifyRequest, verifyErr := newFamilyRequest(detailsURL.String(), true)
+			if verifyErr == nil {
+				verifyRequest = verifyRequest.Clone(verifyCtx)
+				if verifyResponse, doErr := apiClient.Do(verifyRequest); doErr == nil {
+					if verifyData, readErr := readLimited(verifyResponse); readErr == nil {
+						if value, decodeErr := decodeObject(verifyData); decodeErr == nil && !familyResponseError(value) {
+							present := false
+							verifiedMembers, _ := value["family-members"].([]any)
+							for _, rawMember := range verifiedMembers {
+								member, _ := rawMember.(map[string]any)
+								if strings.EqualFold(familyMemberAppleID(member), target.AppleID) {
+									present = true
+								}
+							}
+							if !present && len(verifiedMembers) == len(members)-1 {
+								verified, confirmed = value, true
+							}
+						}
+					}
+				}
+			}
+			verifyCancel()
+			if !confirmed {
+				time.Sleep(400 * time.Millisecond)
+			}
+		}
+		if !confirmed {
+			if removeRequestErr != nil {
+				return fmt.Errorf("family member removal transport failed and current family still includes the target: %w", removeRequestErr)
+			}
+			return errors.New("family member removal was not confirmed by current organizer state")
+		}
+		details = verified
+		members, _ = details["family-members"].([]any)
+		invites, _ = details["family-invitations"].([]any)
+		pending, _ = details["pending-members"].([]any)
+		organizers, children, me, selfOrganizer, selfMember = summarizeFamilyMembers(members)
+		fmt.Printf("bound pool member removal verified; members=%d purchase-sharing-enabled=false location-sharing-enabled=false\n", len(members))
 	}
 	if *addPoolMemberDir != "" {
 		if organizers != 1 || me != 1 || !boolValue(details["is-member-of-family"]) {
@@ -1603,7 +1722,7 @@ func run() error {
 		}
 		fmt.Println(safeFamilyStatusPrefix + string(encoded))
 	}
-	fmt.Printf("family details accepted; members=%d organizers=%d self=%d children=%d invitations=%d pending=%d; mutation-submitted=%t\n", len(members), organizers, me, children, len(invites), len(pending), *createFamily || *shareICloudStorage || *joinSharedStorage || *addPoolMemberDir != "" || *inviteAccountDir != "" || acceptedInvitation)
+	fmt.Printf("family details accepted; members=%d organizers=%d self=%d children=%d invitations=%d pending=%d; mutation-submitted=%t\n", len(members), organizers, me, children, len(invites), len(pending), *createFamily || *shareICloudStorage || *joinSharedStorage || *addPoolMemberDir != "" || *removePoolMemberDir != "" || *inviteAccountDir != "" || acceptedInvitation)
 	if *createFamily {
 		fmt.Println("family creation verified; organizer=self members=1 invitations=0")
 	}

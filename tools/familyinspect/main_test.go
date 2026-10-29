@@ -89,3 +89,17 @@ func TestFindFamilyIntegerAcceptsNestedStorageBytes(t *testing.T) {
 		t.Fatalf("unexpected storage bytes %d", got)
 	}
 }
+
+func TestSummarizeFamilyMembersAndAccountBinding(t *testing.T) {
+	members := []any{
+		map[string]any{"member-apple-id": "organizer@example.test", "member-is-organizer": true, "is-me": true, "member-dsid": "123"},
+		map[string]any{"appleId": "member@example.test", "member-is-child-account": false, "member-dsid": float64(456)},
+	}
+	organizers, children, me, selfOrganizer, self := summarizeFamilyMembers(members)
+	if organizers != 1 || children != 0 || me != 1 || !selfOrganizer || self == nil {
+		t.Fatalf("unexpected family summary organizers=%d children=%d me=%d selfOrganizer=%t", organizers, children, me, selfOrganizer)
+	}
+	if got := familyMemberAppleID(members[1].(map[string]any)); got != "member@example.test" {
+		t.Fatalf("unexpected member binding %q", got)
+	}
+}
