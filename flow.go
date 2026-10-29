@@ -33,19 +33,20 @@ func defaultBackend(p gsa.AnisetteProvider, sess *gsa.Session) loginBackend {
 // Login handles Apple ID authentication and any pending two-factor challenge.
 // Call Client to complete iCloud login; no account data is fetched.
 type Login struct {
-	creds          Credentials
-	store          Store
-	backend        loginBackend
-	anisette       gsa.AnisetteProvider
-	stateful       *anisette.Provider
-	fetchDelegate  delegateFetcher
-	needsTwoFactor bool
-	result         *gsa.LoginResult
-	adsid          string
-	idmsToken      string
-	client         *Client
-	serialNumber   string
-	storeCommerce  *icloud.StoreCommerceSession
+	creds           Credentials
+	store           Store
+	backend         loginBackend
+	anisette        gsa.AnisetteProvider
+	stateful        *anisette.Provider
+	fetchDelegate   delegateFetcher
+	needsTwoFactor  bool
+	result          *gsa.LoginResult
+	adsid           string
+	idmsToken       string
+	client          *Client
+	serialNumber    string
+	storeCommerce   *icloud.StoreCommerceSession
+	gsaCheckpointed bool
 }
 
 func BeginLogin(creds Credentials, store Store, opts ...Option) (*Login, error) {
@@ -261,6 +262,9 @@ func (l *Login) SubmitCode(method TwoFactorMethod, code string) error {
 // the independent iCloud delegate exchange. A delegate refusal must not throw
 // away an accepted SMS/device challenge and force another verification code.
 func (l *Login) checkpointVerifiedGSA() error {
+	if l.gsaCheckpointed {
+		return nil
+	}
 	if l.needsTwoFactor || l.result == nil || l.result.SessionPayload == nil {
 		return errors.New("appleservices: verified GSA session is unavailable")
 	}
@@ -273,6 +277,7 @@ func (l *Login) checkpointVerifiedGSA() error {
 	if err := l.store.SaveSession(&sess); err != nil {
 		return fmt.Errorf("appleservices: save verified GSA session: %w", err)
 	}
+	l.gsaCheckpointed = true
 	return nil
 }
 
@@ -310,6 +315,12 @@ func (l *Login) Client() (*Client, error) {
 	}
 	if saveErr != nil {
 		return nil, saveErr
+	}
+	// iCloud delegate acceptance is independent from account authentication.
+	// Persist the verified account-bound GSA state first so a delegate/terms
+	// refusal cannot consume a successful password or 2FA challenge.
+	if err := l.checkpointVerifiedGSA(); err != nil {
+		return nil, err
 	}
 	dt, err := l.fetchDelegate(headers, l.creds.AppleID, l.adsid, pet)
 	if err != nil {

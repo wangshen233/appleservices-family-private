@@ -89,7 +89,7 @@ func testDelegate(map[string]string, string, string, string) (icloud.DelegateTok
 	return icloud.DelegateTokens{DSID: "test-dsid", MMEAuthToken: "test-mme"}, nil
 }
 
-func TestNoTwoFactorPersistsOnlyAfterICloudLogin(t *testing.T) {
+func TestNoTwoFactorCheckpointsGSABeforeICloudLogin(t *testing.T) {
 	s := &memoryStore{}
 	b := &fakeBackend{results: []*gsa.LoginResult{testResult(false)}}
 	delegates := 0
@@ -111,7 +111,7 @@ func TestNoTwoFactorPersistsOnlyAfterICloudLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.MMEAuthToken == "" || s.saves != 1 || s.session.AppleID != "owner@example.test" {
+	if c.MMEAuthToken == "" || s.saves != 2 || s.session.AppleID != "owner@example.test" {
 		t.Fatal("successful login did not return tokens and save account-bound session")
 	}
 	if _, err := l.Client(); err != nil {
@@ -157,7 +157,7 @@ func TestCheckpointRequiresAuthenticatedClient(t *testing.T) {
 	if _, err = login.Client(); err != nil {
 		t.Fatal(err)
 	}
-	if err = login.SaveSession(); err != nil || store.saves != 2 || store.session.AppleID != "owner@example.test" {
+	if err = login.SaveSession(); err != nil || store.saves != 3 || store.session.AppleID != "owner@example.test" {
 		t.Fatal("active session was not checkpointed")
 	}
 	store.saveErr = errors.New("storage unavailable")
@@ -261,7 +261,7 @@ func TestFailedVerificationRemainsPending(t *testing.T) {
 	}
 }
 
-func TestICloudRejectionDoesNotSaveSession(t *testing.T) {
+func TestICloudRejectionPreservesVerifiedGSASession(t *testing.T) {
 	t.Setenv("APPLESERVICES_ALLOW_DEGRADED_ICLOUD", "1")
 	s := &memoryStore{}
 	b := &fakeBackend{results: []*gsa.LoginResult{testResult(false)}}
@@ -275,8 +275,8 @@ func TestICloudRejectionDoesNotSaveSession(t *testing.T) {
 	if _, err := l.Client(); err == nil {
 		t.Fatal("reported success without iCloud acceptance")
 	}
-	if s.saves != 0 {
-		t.Fatal("saved rejected iCloud login")
+	if s.saves != 1 || s.session == nil || s.session.AppleID != "owner@example.test" {
+		t.Fatal("verified GSA session was not preserved after rejected iCloud login")
 	}
 }
 
