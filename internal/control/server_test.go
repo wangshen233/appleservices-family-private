@@ -104,3 +104,31 @@ func TestControlRejectsUnknownOrOversizedInput(t *testing.T) {
 		}
 	}
 }
+
+func TestControlAcceptsHMEWebTermsAction(t *testing.T) {
+	dir := t.TempDir()
+	server, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	data, _ := json.Marshal(map[string]any{"pid": server.Record.PID, "running": true})
+	if err := os.WriteFile(filepath.Join(dir, "runtime.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		command := <-server.Commands
+		command.Reply <- Result{OK: command.Action.Action == "hme-accept-terms"}
+	}()
+	request, _ := http.NewRequest("POST", server.Record.URL+"/action", bytes.NewBufferString(`{"action":"hme-accept-terms"}`))
+	request.Header.Set("X-Control-Token", server.Record.Token)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var result Result
+	if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&result) != nil || !result.OK {
+		t.Fatal("hme-accept-terms action was not delivered")
+	}
+}

@@ -554,6 +554,35 @@ func run() (runErr error) {
 		return hmeClient.List(actionCtx)
 	}
 	performAction := func(actionCtx context.Context, action, visibleRequestID, commandCode, commandLabel, commandNote string) control.Result {
+		if action == "hme-accept-terms" {
+			queryCtx, done := context.WithTimeout(actionCtx, 115*time.Second)
+			defer done()
+			if err := requireHMEFamilyMember(*dir, time.Now().UTC()); err != nil {
+				return control.Result{Message: "当前账号不满足隐藏邮件地址家庭条件：" + err.Error(), Stage: "hme-family"}
+			}
+			var clientErr error
+			hmeClient, clientErr = icloud.NewHideMyEmailClient(*dir, appleID)
+			if clientErr != nil {
+				return control.Result{Message: "无法初始化隐藏邮件地址客户端", Stage: "hme-session"}
+			}
+			err := hmeClient.AcceptPendingTerms(queryCtx)
+			if errors.Is(err, icloud.ErrHMEWebRepairSessionUnavailable) {
+				err = hmeClient.AuthenticateAndAcceptTerms(queryCtx, password, generateCode)
+			}
+			if err != nil {
+				return control.Result{Message: "iCloud Web 条款修复未完成：" + err.Error(), Stage: "hme-terms"}
+			}
+			info, err := hmeClient.List(queryCtx)
+			if errors.Is(err, icloud.ErrHMEAuthenticationRequired) {
+				if err = hmeClient.Authenticate(queryCtx, password, generateCode); err == nil {
+					info, err = hmeClient.List(queryCtx)
+				}
+			}
+			if err != nil {
+				return control.Result{Message: "条款已提交，但隐藏邮件地址只读验收失败：" + err.Error(), Stage: "hme-list"}
+			}
+			return control.Result{OK: true, Message: "iCloud Web 条款已接受，隐藏邮件地址只读验收通过", Stage: "hme-list", HideMyEmail: info}
+		}
 		if strings.HasPrefix(action, "hme-") {
 			queryCtx, done := context.WithTimeout(actionCtx, 115*time.Second)
 			defer done()

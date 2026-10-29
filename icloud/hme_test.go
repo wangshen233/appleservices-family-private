@@ -3,6 +3,7 @@ package icloud
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -86,5 +87,59 @@ func TestHideMyEmailSafeAliasOmitsPrivateIdentifier(t *testing.T) {
 	}
 	if string(data) != `{"email":"alias@icloud.com","active":false}` {
 		t.Fatalf("private identifier leaked in %s", data)
+	}
+}
+
+func TestValidateHMEWebCookiesExplainsRepairState(t *testing.T) {
+	if err := validateHMEWebCookies([]*http.Cookie{{Name: "X-APPLE-WEBAUTH-TOKEN", Value: "token"}}); err != nil {
+		t.Fatal(err)
+	}
+	err := validateHMEWebCookies([]*http.Cookie{{Name: "X-APPLE-WEBAUTH-REPAIR", Value: "repair"}})
+	if !errors.Is(err, ErrHMEWebRepairRequired) {
+		t.Fatalf("repair state was not explained: %v", err)
+	}
+}
+
+func TestAcceptHMEWebTermsUsesAdvertisedVersion(t *testing.T) {
+	var accepted int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/getTerms":
+			if r.Method != http.MethodGet {
+				t.Fatalf("getTerms method = %s", r.Method)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"iCloudTerms": map[string]any{"version": 634301}})
+		case "/repairDone":
+			if r.Method != http.MethodGet {
+				t.Fatalf("repairDone method = %s", r.Method)
+			}
+			var body struct {
+				Accepted int `json:"acceptedICloudTerms"`
+			}
+			if json.NewDecoder(r.Body).Decode(&body) != nil {
+				t.Fatal("repairDone body was not valid JSON")
+			}
+			accepted = body.Accepted
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &HideMyEmailClient{http: server.Client(), jar: jar}
+	if err := client.acceptHMEWebTerms(context.Background(), server.URL, "zh-cn"); err != nil {
+		t.Fatal(err)
+	}
+	if accepted != 634301 {
+		t.Fatalf("accepted terms version = %d", accepted)
+	}
+}
+
+func TestAcceptPendingTermsRequiresRepairCookie(t *testing.T) {
+	jar, _ := cookiejar.New(nil)
+	client := &HideMyEmailClient{setupBase: "https://setup.icloud.com/setup/ws/1", http: http.DefaultClient, jar: jar}
+	if err := client.AcceptPendingTerms(context.Background()); !errors.Is(err, ErrHMEWebRepairSessionUnavailable) {
+		t.Fatalf("missing repair session was not rejected: %v", err)
 	}
 }

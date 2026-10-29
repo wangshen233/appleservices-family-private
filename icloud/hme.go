@@ -31,7 +31,11 @@ const (
 	hmeWebUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 )
 
-var ErrHMEAuthenticationRequired = errors.New("hide my email web authentication required")
+var (
+	ErrHMEAuthenticationRequired      = errors.New("hide my email web authentication required")
+	ErrHMEWebRepairRequired           = errors.New("Apple 要求先接受当前 iCloud Web 条款")
+	ErrHMEWebRepairSessionUnavailable = errors.New("没有可复用的 iCloud Web repair 会话")
+)
 
 type HideMyEmailAlias struct {
 	Email           string `json:"email"`
@@ -255,6 +259,46 @@ func (c *HideMyEmailClient) authRequest(ctx context.Context, state *hmeAuthState
 // Authenticate creates a dedicated iCloud Web session. codeProvider runs only
 // after Apple has issued a trusted-device challenge for this same account.
 func (c *HideMyEmailClient) Authenticate(ctx context.Context, password string, codeProvider func(context.Context) (string, error)) error {
+	return c.authenticate(ctx, password, codeProvider, false)
+}
+
+// AuthenticateAndAcceptTerms creates a fresh iCloud Web session and accepts
+// the exact iCloud terms version Apple advertises for this account. Callers
+// must obtain explicit user authorization immediately before invoking it.
+func (c *HideMyEmailClient) AuthenticateAndAcceptTerms(ctx context.Context, password string, codeProvider func(context.Context) (string, error)) error {
+	return c.authenticate(ctx, password, codeProvider, true)
+}
+
+// AcceptPendingTerms uses a previously saved, account-bound repair session.
+// It does not authenticate, create aliases, or alter family membership.
+func (c *HideMyEmailClient) AcceptPendingTerms(ctx context.Context) error {
+	setupBase := c.setupBase
+	locale := "en-us"
+	if strings.EqualFold(c.session.AccountCountry, "CHN") || strings.EqualFold(c.session.AccountCountry, "CN") {
+		setupBase = "https://setup.icloud.com.cn/setup/ws/1"
+		locale = "zh-cn"
+	}
+	setupURL, err := url.Parse(setupBase)
+	if err != nil {
+		return errors.New("iCloud Web repair endpoint is invalid")
+	}
+	hasRepair := false
+	for _, cookie := range c.jar.Cookies(setupURL) {
+		if cookie.Name == "X-APPLE-WEBAUTH-REPAIR" && cookie.Value != "" {
+			hasRepair = true
+			break
+		}
+	}
+	if !hasRepair {
+		return ErrHMEWebRepairSessionUnavailable
+	}
+	if err := c.acceptHMEWebTerms(ctx, setupBase, locale); err != nil {
+		return err
+	}
+	return c.saveSession()
+}
+
+func (c *HideMyEmailClient) authenticate(ctx context.Context, password string, codeProvider func(context.Context) (string, error), acceptTerms bool) error {
 	if password == "" {
 		return errors.New("hide my email web login requires the current account password")
 	}
@@ -344,42 +388,121 @@ func (c *HideMyEmailClient) Authenticate(ctx context.Context, password string, c
 	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return errors.New("Apple web session trust failed")
 	}
-	return c.accountLogin(ctx, state)
+	return c.accountLogin(ctx, state, acceptTerms)
 }
 
-func (c *HideMyEmailClient) accountLogin(ctx context.Context, state *hmeAuthState) error {
+func validateHMEWebCookies(cookies []*http.Cookie) error {
+	hasWebSession, requiresRepair := false, false
+	for _, cookie := range cookies {
+		switch cookie.Name {
+		case "X-APPLE-DS-WEB-SESSION-TOKEN", "X-APPLE-WEBAUTH-TOKEN":
+			hasWebSession = cookie.Value != ""
+		case "X-APPLE-WEBAUTH-REPAIR":
+			requiresRepair = cookie.Value != ""
+		}
+	}
+	if hasWebSession {
+		return nil
+	}
+	if requiresRepair {
+		return ErrHMEWebRepairRequired
+	}
+	return errors.New("Apple 未签发 iCloud Web 会话令牌")
+}
+
+type hmeAccountLoginResult struct {
+	DSInfo struct {
+		DSID         string `json:"dsid"`
+		LanguageCode string `json:"languageCode"`
+	} `json:"dsInfo"`
+	Webservices map[string]struct {
+		URL string `json:"url"`
+	} `json:"webservices"`
+	TermsUpdateNeeded bool `json:"termsUpdateNeeded"`
+}
+
+func (c *HideMyEmailClient) accountLogin(ctx context.Context, state *hmeAuthState, acceptTerms bool) error {
 	setupBase := c.setupBase
 	if strings.EqualFold(state.accountCountry, "CHN") || strings.EqualFold(state.accountCountry, "CN") {
 		setupBase = "https://setup.icloud.com.cn/setup/ws/1"
 	}
-	body, _ := json.Marshal(map[string]any{"dsWebAuthToken": state.sessionToken, "accountCountryCode": state.accountCountry, "extended_login": true, "trustToken": state.trustToken})
-	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, setupBase+"/accountLogin", bytes.NewReader(body))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "*/*")
-	request.Header.Set("Origin", "https://www.icloud.com")
-	request.Header.Set("User-Agent", hmeWebUserAgent)
-	response, err := c.http.Do(request)
+	loginBody, _ := json.Marshal(map[string]any{"dsWebAuthToken": state.sessionToken, "accountCountryCode": state.accountCountry, "extended_login": true, "trustToken": state.trustToken})
+	data, err := c.hmeSetupRequest(ctx, http.MethodPost, setupBase+"/accountLogin", loginBody)
 	if err != nil {
-		return err
-	}
-	data, readErr := io.ReadAll(io.LimitReader(response.Body, (4<<20)+1))
-	response.Body.Close()
-	if readErr != nil || len(data) > 4<<20 || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return errors.New("Apple iCloud Web session establishment failed")
 	}
-	var result struct {
-		DSInfo struct {
-			DSID string `json:"dsid"`
-		} `json:"dsInfo"`
-		Webservices map[string]struct {
-			URL string `json:"url"`
-		} `json:"webservices"`
+	var result hmeAccountLoginResult
+	if json.Unmarshal(data, &result) != nil || result.DSInfo.DSID == "" {
+		return errors.New("iCloud+ Hide My Email is unavailable for this account")
 	}
-	if json.Unmarshal(data, &result) != nil || result.DSInfo.DSID == "" || result.Webservices["premiummailsettings"].URL == "" {
+	if result.TermsUpdateNeeded {
+		if !acceptTerms {
+			return ErrHMEWebRepairRequired
+		}
+		if err := c.acceptHMEWebTerms(ctx, setupBase, result.DSInfo.LanguageCode); err != nil {
+			return err
+		}
+		data, err = c.hmeSetupRequest(ctx, http.MethodPost, setupBase+"/accountLogin", loginBody)
+		result = hmeAccountLoginResult{}
+		if err != nil || json.Unmarshal(data, &result) != nil || result.TermsUpdateNeeded {
+			return errors.New("Apple 未确认 iCloud Web 条款接受状态")
+		}
+	}
+	if result.Webservices["premiummailsettings"].URL == "" {
 		return errors.New("iCloud+ Hide My Email is unavailable for this account")
 	}
 	c.session = hmeSession{AppleID: c.appleID, DSID: result.DSInfo.DSID, ClientID: randomHex(16), ServiceURL: strings.TrimRight(result.Webservices["premiummailsettings"].URL, "/"), AccountCountry: state.accountCountry}
+	serviceURL, _ := url.Parse(c.session.ServiceURL)
+	if err := validateHMEWebCookies(c.jar.Cookies(serviceURL)); err != nil {
+		return err
+	}
 	return c.saveSession()
+}
+
+func (c *HideMyEmailClient) hmeSetupRequest(ctx context.Context, method, endpoint string, body []byte) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "*/*")
+	request.Header.Set("Origin", "https://www.icloud.com")
+	request.Header.Set("Referer", "https://www.icloud.com/")
+	request.Header.Set("User-Agent", hmeWebUserAgent)
+	response, err := c.http.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	data, readErr := io.ReadAll(io.LimitReader(response.Body, (4<<20)+1))
+	if readErr != nil || len(data) > 4<<20 || response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, errors.New("Apple iCloud Web setup request failed")
+	}
+	return data, nil
+}
+
+func (c *HideMyEmailClient) acceptHMEWebTerms(ctx context.Context, setupBase, locale string) error {
+	if strings.TrimSpace(locale) == "" {
+		locale = "zh-cn"
+	}
+	body, _ := json.Marshal(map[string]string{"locale": locale})
+	data, err := c.hmeSetupRequest(ctx, http.MethodGet, strings.TrimRight(setupBase, "/")+"/getTerms", body)
+	if err != nil {
+		return errors.New("无法读取 Apple 当前 iCloud Web 条款版本")
+	}
+	var terms struct {
+		ICloudTerms struct {
+			Version int `json:"version"`
+		} `json:"iCloudTerms"`
+	}
+	if json.Unmarshal(data, &terms) != nil || terms.ICloudTerms.Version <= 0 {
+		return errors.New("Apple 未返回有效的 iCloud Web 条款版本")
+	}
+	body, _ = json.Marshal(map[string]int{"acceptedICloudTerms": terms.ICloudTerms.Version})
+	if _, err = c.hmeSetupRequest(ctx, http.MethodGet, strings.TrimRight(setupBase, "/")+"/repairDone", body); err != nil {
+		return errors.New("Apple 未接受 iCloud Web 条款确认")
+	}
+	return nil
 }
 
 type hmeEnvelope struct {

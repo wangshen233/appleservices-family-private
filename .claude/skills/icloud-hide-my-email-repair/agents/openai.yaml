@@ -1,0 +1,4 @@
+interface:
+  display_name: "iCloud 隐私邮箱修复"
+  short_description: "修复 iCloud Web 条款会话并只读验收隐私邮箱"
+  default_prompt: "修复指定 Apple 账号的 iCloud Web 条款状态，并只读验证隐藏邮件地址。"
