@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -93,6 +94,7 @@ type view struct {
 	StoragePlan          *icloud.StoragePlanInfo `json:"storage_plan,omitempty"`
 	StoragePlanCheckedAt string                  `json:"storage_plan_checked_at,omitempty"`
 	StoragePlanStale     bool                    `json:"storage_plan_stale"`
+	HideMyEmailAvailable bool                    `json:"hide_my_email_available"`
 }
 type credentials struct {
 	AppleID   string `json:"apple_id"`
@@ -394,6 +396,23 @@ func (s *Server) recordFor(dir string) (control.Record, error) {
 func (s *Server) call(ctx context.Context, path string, body any, result any) error {
 	return s.callFor(ctx, s.config.Dir, path, body, result)
 }
+
+func workerHTTPError(status int, data []byte, body any) error {
+	if status == http.StatusBadRequest {
+		if action, ok := body.(control.Action); ok && strings.HasPrefix(action.Action, "hme-") {
+			return errors.New("当前账号后台版本不支持隐私邮箱，请重新连接此账号完成升级")
+		}
+		if bytes.Contains(data, []byte("unknown action")) {
+			return errors.New("当前账号后台版本不支持此操作，请重新连接后重试")
+		}
+		return errors.New("后台拒绝了无效操作")
+	}
+	if status == http.StatusGatewayTimeout || status == http.StatusServiceUnavailable {
+		return errors.New("后台正在处理其他操作，请稍后重试")
+	}
+	return errors.New("后台操作未完成，请检查运行状态")
+}
+
 func (s *Server) callFor(ctx context.Context, dir, path string, body any, result any) error {
 	record, err := s.recordFor(dir)
 	if err != nil {
@@ -431,7 +450,8 @@ func (s *Server) callFor(ctx context.Context, dir, path string, body any, result
 	defer response.Body.Close()
 	client.CloseIdleConnections()
 	if response.StatusCode != 200 {
-		return errors.New("后台正忙，请稍后重试")
+		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return workerHTTPError(response.StatusCode, data, body)
 	}
 	if json.NewDecoder(io.LimitReader(response.Body, 128*1024)).Decode(result) != nil {
 		return errors.New("后台返回了无效数据")
@@ -788,6 +808,7 @@ func (s *Server) snapshotFor(ctx context.Context, id string) view {
 			result.Devices = live.Devices
 			result.Pending = live.Pending
 			result.CodeReady = live.CodeReady
+			result.HideMyEmailAvailable = slices.Contains(live.Capabilities, "hide-my-email")
 			result.ControlReady = true
 		}
 	}

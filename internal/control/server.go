@@ -39,10 +39,11 @@ type Pending struct {
 	ReceivedAt time.Time `json:"received_at"`
 }
 type View struct {
-	Status    json.RawMessage `json:"status"`
-	Devices   []Device        `json:"devices"`
-	Pending   *Pending        `json:"pending"`
-	CodeReady bool            `json:"code_ready"`
+	Status       json.RawMessage `json:"status"`
+	Devices      []Device        `json:"devices"`
+	Pending      *Pending        `json:"pending"`
+	CodeReady    bool            `json:"code_ready"`
+	Capabilities []string        `json:"capabilities,omitempty"`
 }
 type Action struct {
 	Action    string `json:"action"`
@@ -170,7 +171,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mu.Lock()
-		view := View{Status: data, Devices: s.devices, Pending: s.pending, CodeReady: s.ready}
+		view := View{Status: data, Devices: s.devices, Pending: s.pending, CodeReady: s.ready, Capabilities: []string{"hide-my-email"}}
 		s.mu.Unlock()
 		json.NewEncoder(w).Encode(view)
 		return

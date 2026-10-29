@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -239,6 +240,17 @@ func TestSameFamilySummaryRequiresCurrentMatchingMember(t *testing.T) {
 	member.StorageBytes = 200 << 30
 	if sameFamilySummary(organizer, member) {
 		t.Fatal("different shared storage was accepted")
+	}
+}
+
+func TestWorkerHTTPErrorDistinguishesOldWorkerFromBusy(t *testing.T) {
+	old := workerHTTPError(http.StatusBadRequest, []byte(`{"message":"unknown action"}`), control.Action{Action: "hme-list"})
+	if old == nil || !strings.Contains(old.Error(), "版本不支持隐私邮箱") || strings.Contains(old.Error(), "忙") {
+		t.Fatalf("old worker was misreported: %v", old)
+	}
+	busy := workerHTTPError(http.StatusGatewayTimeout, nil, control.Action{Action: "hme-list"})
+	if busy == nil || !strings.Contains(busy.Error(), "正在处理其他操作") {
+		t.Fatalf("busy worker was misreported: %v", busy)
 	}
 }
 
