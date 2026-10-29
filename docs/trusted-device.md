@@ -31,6 +31,8 @@
 ```
 
 浏览器面板默认位于 `http://127.0.0.1:18741`，实现位于 `cmd/dashboard` 与 `internal/dashboard`。
+
+账号目录存在并通过绑定检查的 `icloud-accepted.json` 时，侧栏会显示“iCloud 已激活”。即使该账号后台已停止，面板仍允许用 accepted MME checkpoint 和本账号 native ADI 实时读取当前配额与可购方案；购买会话、验证码和设备列表仍要求运行中的 worker。
 后台使用 `internal/control` 的随机端口和独立控制凭据；面板代理命令，不把后台凭据发送到浏览器。
 两个监听器都只绑定 `127.0.0.1`，所有操作要求随机令牌，拒绝跨来源和非本机主机名请求。
 面板不读取照片、联系人、钥匙串或 iMessage。

@@ -68,17 +68,18 @@ type Status struct {
 	FailureStage         string    `json:"failure_stage,omitempty"`
 }
 type view struct {
-	Status       Status           `json:"status"`
-	Devices      []control.Device `json:"devices"`
-	Pending      *control.Pending `json:"pending"`
-	CodeReady    bool             `json:"code_ready"`
-	ControlReady bool             `json:"control_ready"`
-	Launching    bool             `json:"launching"`
-	Message      string           `json:"message"`
-	Account      string           `json:"account"`
-	LoginAccount string           `json:"login_account,omitempty"`
-	Accounts     []AccountView    `json:"accounts,omitempty"`
-	Selected     string           `json:"selected,omitempty"`
+	Status          Status           `json:"status"`
+	Devices         []control.Device `json:"devices"`
+	Pending         *control.Pending `json:"pending"`
+	CodeReady       bool             `json:"code_ready"`
+	ControlReady    bool             `json:"control_ready"`
+	Launching       bool             `json:"launching"`
+	Message         string           `json:"message"`
+	Account         string           `json:"account"`
+	LoginAccount    string           `json:"login_account,omitempty"`
+	Accounts        []AccountView    `json:"accounts,omitempty"`
+	Selected        string           `json:"selected,omitempty"`
+	ICloudActivated bool             `json:"icloud_activated"`
 }
 type credentials struct {
 	AppleID   string `json:"apple_id"`
@@ -144,7 +145,8 @@ func (s *Server) listAccounts(ctx context.Context) []AccountView {
 	for _, account := range accounts {
 		status := s.accountStatus(account)
 		item := AccountView{ID: account.ID, Name: account.Name, Account: maskAccount(account.AppleID),
-			State: status.State, Running: status.Running, Authenticated: status.Authenticated}
+			State: status.State, Running: status.Running, Authenticated: status.Authenticated,
+			ICloudActivated: acceptedCheckpointReady(account.Dir, account.AppleID)}
 		account.mu.Lock()
 		if account.message != "" {
 			item.Message = account.message
@@ -436,6 +438,7 @@ func (s *Server) snapshotFor(ctx context.Context, id string) view {
 	if account != nil {
 		result.Selected = account.ID
 		result.LoginAccount = account.AppleID
+		result.ICloudActivated = acceptedCheckpointReady(account.Dir, account.AppleID)
 	}
 	var session struct {
 		AppleID string `json:"appleId"`
@@ -749,15 +752,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			dir := s.config.Dir
+			var selected *Account
 			if account := r.URL.Query().Get("account"); account != "" {
 				found := s.lookup(account)
 				if found == nil {
 					json.NewEncoder(w).Encode(control.Result{Message: "账号不存在"})
 					return
 				}
+				selected = found
 				dir = found.Dir
+			} else {
+				selected = s.lookup("")
+				if selected != nil {
+					dir = selected.Dir
+				}
 			}
 			var result control.Result
+			if (action.Action == "storage-info" || action.Action == "storage-plan") && !s.readStatusFrom(dir).Running && selected != nil && acceptedCheckpointReady(dir, selected.AppleID) {
+				result = s.acceptedStorageAction(r.Context(), selected, action.Action == "storage-plan")
+				json.NewEncoder(w).Encode(result)
+				return
+			}
 			if err := s.callFor(r.Context(), dir, "/action", action, &result); err != nil {
 				result.Message = err.Error()
 			}

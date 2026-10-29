@@ -32,13 +32,14 @@ type Account struct {
 }
 
 type AccountView struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Account       string `json:"account"`
-	State         string `json:"state"`
-	Running       bool   `json:"running"`
-	Authenticated bool   `json:"authenticated"`
-	Message       string `json:"message,omitempty"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Account         string `json:"account"`
+	State           string `json:"state"`
+	Running         bool   `json:"running"`
+	Authenticated   bool   `json:"authenticated"`
+	ICloudActivated bool   `json:"icloud_activated"`
+	Message         string `json:"message,omitempty"`
 }
 
 // registry is the on-disk account list.
