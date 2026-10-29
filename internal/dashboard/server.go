@@ -165,6 +165,7 @@ func (s *Server) listAccounts(ctx context.Context) []AccountView {
 			State: status.State, Running: status.Running, Authenticated: status.Authenticated,
 			ICloudActivated: acceptedCheckpointReady(account.Dir, account.AppleID)}
 		if family, checkedAt, stale := readFamilyCache(account); family != nil {
+			s.resolveCachedFamilyOrganizer(account, family)
 			item.FamilyMember = family.Member
 			item.FamilyOrganizer = family.Organizer
 			item.FamilyOrganizerAccount = family.OrganizerAccount
