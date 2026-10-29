@@ -39,6 +39,10 @@ type AccountView struct {
 	Running         bool   `json:"running"`
 	Authenticated   bool   `json:"authenticated"`
 	ICloudActivated bool   `json:"icloud_activated"`
+	FamilyMember    bool   `json:"family_member,omitempty"`
+	FamilyOrganizer bool   `json:"family_organizer,omitempty"`
+	FamilyStale     bool   `json:"family_stale"`
+	FamilyCheckedAt string `json:"family_checked_at,omitempty"`
 	Message         string `json:"message,omitempty"`
 }
 
@@ -146,6 +150,7 @@ var legacyStateFiles = []string{
 	"session.json", "device.json", "runtime.json", "control.json",
 	"stop-request.json", "probe-urls.json", "daemon.out.log", "daemon.err.log",
 	"native-adi", "icloud-modern-webview", "icloud-reset-backups",
+	"family-status.json", "storage-status.json", "storage-plans.json",
 }
 
 // legacyIdentity recovers the migrated account's Apple ID from the session it

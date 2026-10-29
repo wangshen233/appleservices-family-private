@@ -193,6 +193,23 @@ func TestParseFamilyStatusUsesOnlyMarkedRedactedJSON(t *testing.T) {
 	}
 }
 
+func TestUniquePoolOrganizerRequiresOneMatchingFamily(t *testing.T) {
+	current := &control.FamilyInfo{Member: true, Members: 3, Organizers: 1, StorageKnown: true, StorageBytes: 50 << 30}
+	organizer := &Account{ID: "04-account", Name: "primary"}
+	member := &Account{ID: "03-account", Name: "member"}
+	candidates := []familyCandidate{
+		{account: organizer, family: &control.FamilyInfo{Member: true, Organizer: true, Members: 3, Organizers: 1, StorageKnown: true, StorageBytes: 50 << 30}},
+		{account: member, family: &control.FamilyInfo{Member: true, Organizer: false, Members: 3, Organizers: 1, StorageKnown: true, StorageBytes: 50 << 30}},
+	}
+	if got := uniquePoolOrganizer(current, candidates); got != organizer {
+		t.Fatalf("unexpected organizer: %#v", got)
+	}
+	candidates = append(candidates, familyCandidate{account: &Account{ID: "other"}, family: &control.FamilyInfo{Member: true, Organizer: true, Members: 3, Organizers: 1, StorageKnown: true, StorageBytes: 50 << 30}})
+	if got := uniquePoolOrganizer(current, candidates); got != nil {
+		t.Fatalf("ambiguous organizer accepted: %#v", got)
+	}
+}
+
 func TestReconnectRejectsDifferentAccountBeforeStartingWorker(t *testing.T) {
 	s := &Server{}
 	a := &Account{AppleID: "owner@example.test", Dir: t.TempDir()}

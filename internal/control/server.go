@@ -68,28 +68,31 @@ type Result struct {
 }
 
 // FamilyInfo is the redacted, UI-safe state returned by the native FamilyKit
-// helper. It intentionally contains no account identifiers, DSIDs, family IDs,
-// invite codes, tokens, cookies or raw Apple responses.
+// helper. OrganizerAccount and OrganizerName are local dashboard labels, never
+// Apple identifiers. The value intentionally contains no Apple IDs, DSIDs,
+// family IDs, invite codes, tokens, cookies or raw Apple responses.
 type FamilyInfo struct {
-	Member                 bool  `json:"member"`
-	Eligible               bool  `json:"eligible"`
-	EligibilityKnown       bool  `json:"eligibility_known"`
-	Members                int   `json:"members"`
-	Organizers             int   `json:"organizers"`
-	Self                   int   `json:"self"`
-	Children               int   `json:"children"`
-	Invitations            int   `json:"invitations"`
-	Pending                int   `json:"pending"`
-	Organizer              bool  `json:"organizer"`
-	StorageKnown           bool  `json:"storage_known"`
-	StorageParticipating   bool  `json:"storage_participating"`
-	StorageAvailable       bool  `json:"storage_available"`
-	StorageEnabled         bool  `json:"storage_enabled"`
-	StorageBytes           int64 `json:"storage_bytes,omitempty"`
-	PurchaseSharingKnown   bool  `json:"purchase_sharing_known"`
-	PurchaseSharingEnabled bool  `json:"purchase_sharing_enabled"`
-	LocationSharingKnown   bool  `json:"location_sharing_known"`
-	LocationSharingEnabled bool  `json:"location_sharing_enabled"`
+	Member                 bool   `json:"member"`
+	Eligible               bool   `json:"eligible"`
+	EligibilityKnown       bool   `json:"eligibility_known"`
+	Members                int    `json:"members"`
+	Organizers             int    `json:"organizers"`
+	Self                   int    `json:"self"`
+	Children               int    `json:"children"`
+	Invitations            int    `json:"invitations"`
+	Pending                int    `json:"pending"`
+	Organizer              bool   `json:"organizer"`
+	OrganizerAccount       string `json:"organizer_account,omitempty"`
+	OrganizerName          string `json:"organizer_name,omitempty"`
+	StorageKnown           bool   `json:"storage_known"`
+	StorageParticipating   bool   `json:"storage_participating"`
+	StorageAvailable       bool   `json:"storage_available"`
+	StorageEnabled         bool   `json:"storage_enabled"`
+	StorageBytes           int64  `json:"storage_bytes,omitempty"`
+	PurchaseSharingKnown   bool   `json:"purchase_sharing_known"`
+	PurchaseSharingEnabled bool   `json:"purchase_sharing_enabled"`
+	LocationSharingKnown   bool   `json:"location_sharing_known"`
+	LocationSharingEnabled bool   `json:"location_sharing_enabled"`
 }
 type Command struct {
 	Action

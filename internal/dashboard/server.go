@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Laky-64/appleservices/icloud"
 	"github.com/Laky-64/appleservices/internal/control"
 )
 
@@ -71,18 +72,27 @@ type Status struct {
 	FailureStage         string    `json:"failure_stage,omitempty"`
 }
 type view struct {
-	Status          Status           `json:"status"`
-	Devices         []control.Device `json:"devices"`
-	Pending         *control.Pending `json:"pending"`
-	CodeReady       bool             `json:"code_ready"`
-	ControlReady    bool             `json:"control_ready"`
-	Launching       bool             `json:"launching"`
-	Message         string           `json:"message"`
-	Account         string           `json:"account"`
-	LoginAccount    string           `json:"login_account,omitempty"`
-	Accounts        []AccountView    `json:"accounts,omitempty"`
-	Selected        string           `json:"selected,omitempty"`
-	ICloudActivated bool             `json:"icloud_activated"`
+	Status               Status                  `json:"status"`
+	Devices              []control.Device        `json:"devices"`
+	Pending              *control.Pending        `json:"pending"`
+	CodeReady            bool                    `json:"code_ready"`
+	ControlReady         bool                    `json:"control_ready"`
+	Launching            bool                    `json:"launching"`
+	Message              string                  `json:"message"`
+	Account              string                  `json:"account"`
+	LoginAccount         string                  `json:"login_account,omitempty"`
+	Accounts             []AccountView           `json:"accounts,omitempty"`
+	Selected             string                  `json:"selected,omitempty"`
+	ICloudActivated      bool                    `json:"icloud_activated"`
+	Family               *control.FamilyInfo     `json:"family,omitempty"`
+	FamilyCheckedAt      string                  `json:"family_checked_at,omitempty"`
+	FamilyStale          bool                    `json:"family_stale"`
+	Storage              *icloud.StorageInfo     `json:"storage,omitempty"`
+	StorageCheckedAt     string                  `json:"storage_checked_at,omitempty"`
+	StorageStale         bool                    `json:"storage_stale"`
+	StoragePlan          *icloud.StoragePlanInfo `json:"storage_plan,omitempty"`
+	StoragePlanCheckedAt string                  `json:"storage_plan_checked_at,omitempty"`
+	StoragePlanStale     bool                    `json:"storage_plan_stale"`
 }
 type credentials struct {
 	AppleID   string `json:"apple_id"`
@@ -151,6 +161,12 @@ func (s *Server) listAccounts(ctx context.Context) []AccountView {
 		item := AccountView{ID: account.ID, Name: account.Name, Account: maskAccount(account.AppleID),
 			State: status.State, Running: status.Running, Authenticated: status.Authenticated,
 			ICloudActivated: acceptedCheckpointReady(account.Dir, account.AppleID)}
+		if family, checkedAt, stale := readFamilyCache(account); family != nil {
+			item.FamilyMember = family.Member
+			item.FamilyOrganizer = family.Organizer
+			item.FamilyStale = stale
+			item.FamilyCheckedAt = checkedAt.Format(time.RFC3339)
+		}
 		account.mu.Lock()
 		if account.message != "" {
 			item.Message = account.message
@@ -440,6 +456,112 @@ func parseFamilyStatus(output string) (*control.FamilyInfo, error) {
 	return nil, errors.New("家庭工具没有返回状态")
 }
 
+func runFamilyStatus(ctx context.Context, helper string, account *Account, joinStorage bool) (*control.FamilyInfo, error) {
+	args := []string{"-dir", account.Dir, "-safe-json"}
+	if joinStorage {
+		args = append(args, "-join-shared-storage")
+	}
+	command := exec.CommandContext(ctx, helper, args...)
+	command.Env = os.Environ()
+	var output bytes.Buffer
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Run(); err != nil {
+		return nil, errors.New("家庭操作未完成，请刷新状态后核对")
+	}
+	return parseFamilyStatus(output.String())
+}
+
+type familyCandidate struct {
+	account *Account
+	family  *control.FamilyInfo
+}
+
+func uniquePoolOrganizer(current *control.FamilyInfo, candidates []familyCandidate) *Account {
+	if current == nil || !current.Member {
+		return nil
+	}
+	var match *Account
+	for _, candidate := range candidates {
+		family := candidate.family
+		if candidate.account == nil || family == nil || !family.Member || !family.Organizer || family.Organizers != 1 || family.Members != current.Members {
+			continue
+		}
+		if current.StorageKnown && family.StorageKnown && current.StorageBytes > 0 && family.StorageBytes > 0 && current.StorageBytes != family.StorageBytes {
+			continue
+		}
+		if match != nil && match.ID != candidate.account.ID {
+			return nil
+		}
+		match = candidate.account
+	}
+	return match
+}
+
+func (s *Server) resolveFamilyOrganizer(ctx context.Context, helper string, currentAccount *Account, current *control.FamilyInfo) {
+	if current == nil || !current.Member {
+		return
+	}
+	if current.Organizer {
+		current.OrganizerAccount, current.OrganizerName = currentAccount.ID, currentAccount.Name
+		return
+	}
+	s.accountsMu.Lock()
+	accounts := append([]*Account(nil), s.accounts...)
+	s.accountsMu.Unlock()
+	results := make(chan familyCandidate, len(accounts))
+	var wait sync.WaitGroup
+	for _, candidate := range accounts {
+		if candidate == currentAccount || !acceptedCheckpointReady(candidate.Dir, candidate.AppleID) {
+			continue
+		}
+		wait.Add(1)
+		go func(account *Account) {
+			defer wait.Done()
+			readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			family, err := runFamilyStatus(readCtx, helper, account, false)
+			if err == nil {
+				if family.Organizer {
+					family.OrganizerAccount, family.OrganizerName = account.ID, account.Name
+				}
+				_, _ = writeFamilyCache(account, family)
+				results <- familyCandidate{account: account, family: family}
+			}
+		}(candidate)
+	}
+	wait.Wait()
+	close(results)
+	candidates := make([]familyCandidate, 0, len(accounts))
+	for candidate := range results {
+		candidates = append(candidates, candidate)
+	}
+	if organizer := uniquePoolOrganizer(current, candidates); organizer != nil {
+		current.OrganizerAccount, current.OrganizerName = organizer.ID, organizer.Name
+	}
+}
+
+func (s *Server) resolveCachedFamilyOrganizer(currentAccount *Account, current *control.FamilyInfo) {
+	if current == nil || !current.Member || current.Organizer || current.OrganizerAccount != "" {
+		return
+	}
+	s.accountsMu.Lock()
+	accounts := append([]*Account(nil), s.accounts...)
+	s.accountsMu.Unlock()
+	candidates := make([]familyCandidate, 0, len(accounts))
+	for _, account := range accounts {
+		if account == currentAccount {
+			continue
+		}
+		if family, _, _ := readFamilyCache(account); family != nil {
+			candidates = append(candidates, familyCandidate{account: account, family: family})
+		}
+	}
+	if organizer := uniquePoolOrganizer(current, candidates); organizer != nil {
+		current.OrganizerAccount, current.OrganizerName = organizer.ID, organizer.Name
+	}
+}
+
 func (s *Server) familyAction(ctx context.Context, account *Account, joinStorage bool) control.Result {
 	if account == nil || !acceptedCheckpointReady(account.Dir, account.AppleID) {
 		return control.Result{Message: "当前账号尚未完成 iCloud 激活", Stage: "family-preflight"}
@@ -450,29 +572,40 @@ func (s *Server) familyAction(ctx context.Context, account *Account, joinStorage
 	}
 	actionCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	args := []string{"-dir", account.Dir, "-safe-json"}
-	message, stage := "Apple 已返回当前家庭状态", "family-info"
-	if joinStorage {
-		args = append(args, "-join-shared-storage")
-		message, stage = "已加入家庭共享的 iCloud+ 储存空间", "family-storage-joined"
-	}
-	command := exec.CommandContext(actionCtx, helper, args...)
-	command.Env = os.Environ()
-	var output bytes.Buffer
-	command.Stdout = &output
-	command.Stderr = &output
-	if err := command.Run(); err != nil {
-		return control.Result{Message: "家庭操作未完成，请刷新状态后核对", Stage: "family-action"}
-	}
-	family, err := parseFamilyStatus(output.String())
+	family, err := runFamilyStatus(actionCtx, helper, account, joinStorage)
 	if err != nil {
-		return control.Result{Message: err.Error(), Stage: "family-readback"}
+		return control.Result{Message: err.Error(), Stage: "family-action"}
 	}
+	s.resolveFamilyOrganizer(actionCtx, helper, account, family)
+	checkedAt, cacheErr := writeFamilyCache(account, family)
 	if joinStorage && (!family.StorageKnown || !family.StorageParticipating || !family.StorageAvailable || !family.StorageEnabled) {
 		return control.Result{Message: "家庭共享储存尚未完整生效", Stage: "family-storage-readback", Family: family}
 	}
+	message, stage := "Apple 已返回当前家庭状态", "family-info"
+	if joinStorage {
+		message, stage = "已加入家庭共享的 iCloud+ 储存空间", "family-storage-joined"
+	}
+	if cacheErr != nil {
+		message += "；本地缓存未保存，请稍后重新读取"
+		stage = "family-cache-warning"
+	} else {
+		message += " · 已保存 " + checkedAt.Local().Format("15:04")
+	}
 	return control.Result{OK: true, Message: message, Stage: stage, Family: family}
 }
+
+func cacheSafeActionResult(account *Account, result *control.Result) {
+	if account == nil || result == nil {
+		return
+	}
+	if result.Storage != nil {
+		_, _ = writeStorageCache(account, result.Storage)
+	}
+	if result.StoragePlan != nil {
+		_, _ = writePlanCache(account, result.StoragePlan)
+	}
+}
+
 func (s *Server) snapshot(ctx context.Context) view { return s.snapshotFor(ctx, "") }
 
 // snapshotFor renders one account. An empty id selects the server's own
@@ -510,6 +643,22 @@ func (s *Server) snapshotFor(ctx context.Context, id string) view {
 		result.Selected = account.ID
 		result.LoginAccount = account.AppleID
 		result.ICloudActivated = acceptedCheckpointReady(account.Dir, account.AppleID)
+		if family, checkedAt, stale := readFamilyCache(account); family != nil {
+			s.resolveCachedFamilyOrganizer(account, family)
+			result.Family = family
+			result.FamilyCheckedAt = checkedAt.Format(time.RFC3339)
+			result.FamilyStale = stale
+		}
+		if cached, stale := readStorageCache(account, storageCacheFile); cached != nil {
+			result.Storage = cached.Storage
+			result.StorageCheckedAt = cached.CheckedAt.Format(time.RFC3339)
+			result.StorageStale = stale
+		}
+		if cached, stale := readStorageCache(account, planCacheFile); cached != nil {
+			result.StoragePlan = cached.Plans
+			result.StoragePlanCheckedAt = cached.CheckedAt.Format(time.RFC3339)
+			result.StoragePlanStale = stale
+		}
 	}
 	var session struct {
 		AppleID string `json:"appleId"`
@@ -851,17 +1000,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			var result control.Result
 			if selected != nil && (action.Action == "family-info" || action.Action == "family-join-storage") {
 				result = s.familyAction(r.Context(), selected, action.Action == "family-join-storage")
+				cacheSafeActionResult(selected, &result)
 				json.NewEncoder(w).Encode(result)
 				return
 			}
 			if (action.Action == "storage-info" || action.Action == "storage-plan") && !s.readStatusFrom(dir).Running && selected != nil && acceptedCheckpointReady(dir, selected.AppleID) {
 				result = s.acceptedStorageAction(r.Context(), selected, action.Action == "storage-plan")
+				cacheSafeActionResult(selected, &result)
 				json.NewEncoder(w).Encode(result)
 				return
 			}
 			if err := s.callFor(r.Context(), dir, "/action", action, &result); err != nil {
 				result.Message = err.Error()
 			}
+			if selected != nil && result.Family != nil && strings.HasPrefix(action.Action, "family-") {
+				helper := filepath.Join(filepath.Dir(s.config.Worker), "familyinspect.exe")
+				cacheCtx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+				s.resolveFamilyOrganizer(cacheCtx, helper, selected, result.Family)
+				cancel()
+				if _, err := writeFamilyCache(selected, result.Family); err != nil {
+					result.Message = strings.TrimSpace(result.Message + "；本地家庭状态缓存未保存")
+				}
+			}
+			cacheSafeActionResult(selected, &result)
 			json.NewEncoder(w).Encode(result)
 			return
 		default:

@@ -71,6 +71,8 @@ For the current local dashboard workflow:
 
 The WebUI family card must expose the same state machine: select a registered organizer, show current counts/role/storage, keep purchase and location sharing off, and display partial membership separately from shared-storage completion. It must consume structured `FamilyInfo`, never scrape helper logs or expose private family identifiers.
 
+The dashboard persists the redacted result per account in `family-status.json` with an account-directory binding and `checked_at`. This cache exists only to restore the UI after refresh or dashboard restart. Show cached state with its verification time; retain but mark it stale after the configured freshness window. A stale cache must disable join/storage mutations until a fresh Apple read succeeds. Never treat cached eligibility, membership, organizer identity, pricing or storage availability as write authorization. Passwords, PETs, tokens, cookies, verification codes, family IDs and raw responses are never cached.
+
 ## Membership mutations
 
 Read [references/protocol.md](references/protocol.md) before implementing or submitting add, remove, accept, reject, leave or delete operations.
