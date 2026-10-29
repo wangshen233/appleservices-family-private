@@ -97,3 +97,6 @@ body.ui-ready .page-footer{animation:enterUp .5s ease .39s forwards}
 
 @media(max-width:760px){body:before{right:-260px}.page-header h1:after{vertical-align:3px}.family-link:after{display:none}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}.page-header,.top-grid>*,main>.request-card.overview-only,.devices-section,.lower-grid,.page-footer{opacity:1;transform:none}}
+
+.family-remove-controls{margin-top:11px;padding:11px;display:grid;grid-template-columns:minmax(150px,1fr) minmax(170px,240px) auto;align-items:center;gap:9px;border:1px solid #ead7d8;border-radius:8px;background:#fffafa}.family-remove-controls[hidden]{display:none!important}.family-remove-controls>div strong,.family-remove-controls>div small{display:block}.family-remove-controls>div strong{color:#51383a;font-size:10px}.family-remove-controls>div small{margin-top:3px;color:#947477;font-size:8px}.family-remove-controls select{height:36px}.family-remove-controls .button-danger{box-shadow:0 7px 18px #b64b5524}.family-remove-controls .button-danger:not(:disabled):hover{background:#b53f49;box-shadow:0 10px 24px #b64b5533}
+@media(max-width:760px){.family-remove-controls{grid-template-columns:1fr}.family-remove-controls .button{width:100%}}

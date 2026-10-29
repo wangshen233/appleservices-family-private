@@ -210,6 +210,38 @@ func TestUniquePoolOrganizerRequiresOneMatchingFamily(t *testing.T) {
 	}
 }
 
+func TestFamilyRemovalTargetRequiresExactNonOrganizerAccount(t *testing.T) {
+	organizer := &Account{ID: "04-account"}
+	target := &Account{ID: "01-primary"}
+	accounts := []*Account{target, organizer}
+	got, err := familyRemovalTarget(organizer, "01-primary", accounts)
+	if err != nil || got != target {
+		t.Fatalf("unexpected target=%#v err=%v", got, err)
+	}
+	for _, invalid := range []string{"", "04-account", "../01-primary", "missing"} {
+		if got, err := familyRemovalTarget(organizer, invalid, accounts); err == nil || got != nil {
+			t.Fatalf("invalid target %q accepted as %#v", invalid, got)
+		}
+	}
+}
+
+func TestSameFamilySummaryRequiresCurrentMatchingMember(t *testing.T) {
+	organizer := &control.FamilyInfo{Member: true, Organizer: true, Members: 3, Organizers: 1, StorageKnown: true, StorageBytes: 50 << 30}
+	member := &control.FamilyInfo{Member: true, Members: 3, Organizers: 1, StorageKnown: true, StorageBytes: 50 << 30}
+	if !sameFamilySummary(organizer, member) {
+		t.Fatal("matching member was not bound to organizer")
+	}
+	member.Members = 2
+	if sameFamilySummary(organizer, member) {
+		t.Fatal("different family size was accepted")
+	}
+	member.Members = 3
+	member.StorageBytes = 200 << 30
+	if sameFamilySummary(organizer, member) {
+		t.Fatal("different shared storage was accepted")
+	}
+}
+
 func TestReconnectRejectsDifferentAccountBeforeStartingWorker(t *testing.T) {
 	s := &Server{}
 	a := &Account{AppleID: "owner@example.test", Dir: t.TempDir()}

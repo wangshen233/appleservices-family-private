@@ -60,6 +60,11 @@
       <button class="button button-primary" id="familyAddButton" disabled>加入家庭并使用共享空间</button>
       <button class="button button-light" id="familyJoinStorageButton" disabled>仅加入共享储存</button>
     </div>
+    <div class="family-remove-controls" id="familyRemoveControls" hidden>
+      <div><strong>成员管理</strong><small>从当前家庭移出一个池内普通成员</small></div>
+      <select id="familyRemoveMember" aria-label="要移出的家庭成员"></select>
+      <button class="button button-danger" id="familyRemoveButton" disabled>移出家庭</button>
+    </div>
     <p class="family-safety" id="familySafety">购买共享和位置共享不会开启；验证码仅在 Apple 挑战出现后由当前账号自己的本地 Mac 身份生成。</p>
   </section>
   <section class="request-card overview-only"><div class="card-title-row"><h3>iCloud+ 方案</h3><div class="commerce-actions"><button class="text-button" id="planButton" disabled>读取可购方案</button><button class="text-button" id="storeAuthButton" disabled>验证购买会话</button><button class="text-button" id="purchaseButton" disabled>提交 50GB 方案</button></div></div><p id="planSummary" class="card-description">先读取 Apple 实时报价；仅已验证的币种与价格会启用购买按钮。</p><p id="planCacheNote" class="cache-note">尚无本地状态</p><p id="storeAuthSummary" class="card-description">购买会话尚未验证 · 临时会话不会持久化</p><form id="storeAuthForm" hidden><input id="storeCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="Apple Store 六位验证码" aria-label="Apple Store 六位验证码" required><button class="text-button" type="submit">完成购买会话验证</button></form><div id="planList" class="plan-list"></div></section>

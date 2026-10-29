@@ -164,6 +164,7 @@ func (s *Server) listAccounts(ctx context.Context) []AccountView {
 		if family, checkedAt, stale := readFamilyCache(account); family != nil {
 			item.FamilyMember = family.Member
 			item.FamilyOrganizer = family.Organizer
+			item.FamilyOrganizerAccount = family.OrganizerAccount
 			item.FamilyStale = stale
 			item.FamilyCheckedAt = checkedAt.Format(time.RFC3339)
 		}
@@ -498,6 +499,46 @@ func uniquePoolOrganizer(current *control.FamilyInfo, candidates []familyCandida
 	return match
 }
 
+func sameFamilySummary(organizer, member *control.FamilyInfo) bool {
+	if organizer == nil || member == nil || !organizer.Member || !organizer.Organizer || !member.Member || member.Organizer {
+		return false
+	}
+	if organizer.Organizers != 1 || member.Organizers != 1 || organizer.Members != member.Members {
+		return false
+	}
+	return !organizer.StorageKnown || !member.StorageKnown || organizer.StorageBytes <= 0 || member.StorageBytes <= 0 || organizer.StorageBytes == member.StorageBytes
+}
+
+func (s *Server) refreshPoolFamilyMembers(ctx context.Context, helper string, organizer *Account, current *control.FamilyInfo) {
+	if organizer == nil || current == nil || !current.Organizer {
+		return
+	}
+	s.accountsMu.Lock()
+	accounts := append([]*Account(nil), s.accounts...)
+	s.accountsMu.Unlock()
+	var wait sync.WaitGroup
+	for _, candidate := range accounts {
+		if candidate == organizer || !acceptedCheckpointReady(candidate.Dir, candidate.AppleID) {
+			continue
+		}
+		wait.Add(1)
+		go func(account *Account) {
+			defer wait.Done()
+			readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			family, err := runFamilyStatus(readCtx, helper, account, false)
+			if err != nil {
+				return
+			}
+			if sameFamilySummary(current, family) {
+				family.OrganizerAccount, family.OrganizerName = organizer.ID, organizer.Name
+			}
+			_, _ = writeFamilyCache(account, family)
+		}(candidate)
+	}
+	wait.Wait()
+}
+
 func (s *Server) resolveFamilyOrganizer(ctx context.Context, helper string, currentAccount *Account, current *control.FamilyInfo) {
 	if current == nil || !current.Member {
 		return
@@ -576,7 +617,11 @@ func (s *Server) familyAction(ctx context.Context, account *Account, joinStorage
 	if err != nil {
 		return control.Result{Message: err.Error(), Stage: "family-action"}
 	}
-	s.resolveFamilyOrganizer(actionCtx, helper, account, family)
+	if family.Organizer {
+		s.refreshPoolFamilyMembers(actionCtx, helper, account, family)
+	} else {
+		s.resolveFamilyOrganizer(actionCtx, helper, account, family)
+	}
 	checkedAt, cacheErr := writeFamilyCache(account, family)
 	if joinStorage && (!family.StorageKnown || !family.StorageParticipating || !family.StorageAvailable || !family.StorageEnabled) {
 		return control.Result{Message: "家庭共享储存尚未完整生效", Stage: "family-storage-readback", Family: family}
@@ -592,6 +637,75 @@ func (s *Server) familyAction(ctx context.Context, account *Account, joinStorage
 		message += " · 已保存 " + checkedAt.Local().Format("15:04")
 	}
 	return control.Result{OK: true, Message: message, Stage: stage, Family: family}
+}
+
+func familyRemovalTarget(organizer *Account, targetID string, accounts []*Account) (*Account, error) {
+	targetID = strings.TrimSpace(targetID)
+	if organizer == nil || targetID == "" || !idPattern.MatchString(targetID) || targetID == organizer.ID {
+		return nil, errors.New("家庭成员绑定无效")
+	}
+	var target *Account
+	for _, candidate := range accounts {
+		if candidate == nil || candidate.ID != targetID {
+			continue
+		}
+		if target != nil {
+			return nil, errors.New("家庭成员绑定不唯一")
+		}
+		target = candidate
+	}
+	if target == nil {
+		return nil, errors.New("家庭成员不存在")
+	}
+	return target, nil
+}
+
+func (s *Server) removeFamilyMember(ctx context.Context, organizer *Account, targetID string) control.Result {
+	s.accountsMu.Lock()
+	accounts := append([]*Account(nil), s.accounts...)
+	s.accountsMu.Unlock()
+	target, err := familyRemovalTarget(organizer, targetID, accounts)
+	if err != nil {
+		return control.Result{Message: err.Error(), Stage: "family-binding"}
+	}
+	if !acceptedCheckpointReady(organizer.Dir, organizer.AppleID) || !acceptedCheckpointReady(target.Dir, target.AppleID) {
+		return control.Result{Message: "母号或目标成员尚未完成 iCloud 激活", Stage: "family-preflight"}
+	}
+	helper := filepath.Join(filepath.Dir(s.config.Worker), "familyinspect.exe")
+	if info, statErr := os.Stat(helper); statErr != nil || !info.Mode().IsRegular() {
+		return control.Result{Message: "家庭工具不可用，请重新构建本地后台", Stage: "family-worker"}
+	}
+	actionCtx, cancel := context.WithTimeout(ctx, 105*time.Second)
+	defer cancel()
+	command := exec.CommandContext(actionCtx, helper, "-dir", organizer.Dir, "-remove-pool-member-dir", target.Dir, "-safe-json")
+	command.Env = os.Environ()
+	var output bytes.Buffer
+	command.Stdout = &output
+	command.Stderr = &output
+	if runErr := command.Run(); runErr != nil {
+		return control.Result{Message: "成员移除未完成；请先重新读取双方状态，不要重复提交", Stage: "family-remove"}
+	}
+	organizerFamily, parseErr := parseFamilyStatus(output.String())
+	if parseErr != nil || !organizerFamily.Member || !organizerFamily.Organizer || organizerFamily.Organizers != 1 || organizerFamily.Self != 1 {
+		return control.Result{Message: "Apple 已响应，但母号状态回读不完整；不要重复提交", Stage: "family-remove-readback"}
+	}
+	organizerFamily.OrganizerAccount, organizerFamily.OrganizerName = organizer.ID, organizer.Name
+	_, organizerCacheErr := writeFamilyCache(organizer, organizerFamily)
+
+	targetCtx, targetCancel := context.WithTimeout(actionCtx, 35*time.Second)
+	targetFamily, targetErr := runFamilyStatus(targetCtx, helper, target, false)
+	targetCancel()
+	if targetErr != nil || targetFamily.Member {
+		return control.Result{Message: "母号已确认成员移除，但目标账号回读未完成；请刷新目标账号，不要重复移除", Stage: "family-remove-target-readback", Family: organizerFamily}
+	}
+	_, targetCacheErr := writeFamilyCache(target, targetFamily)
+	message := "成员已移出家庭，并通过母号与目标账号双边回读"
+	stage := "family-member-removed"
+	if organizerCacheErr != nil || targetCacheErr != nil {
+		message += "；本地缓存未完整保存，请重新读取状态"
+		stage = "family-remove-cache-warning"
+	}
+	return control.Result{OK: true, Message: message, Stage: stage, Family: organizerFamily}
 }
 
 func cacheSafeActionResult(account *Account, result *control.Result) {
@@ -998,6 +1112,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			var result control.Result
+			if selected != nil && action.Action == "family-remove-member" {
+				result = s.removeFamilyMember(r.Context(), selected, action.Code)
+				json.NewEncoder(w).Encode(result)
+				return
+			}
 			if selected != nil && (action.Action == "family-info" || action.Action == "family-join-storage") {
 				result = s.familyAction(r.Context(), selected, action.Action == "family-join-storage")
 				cacheSafeActionResult(selected, &result)
