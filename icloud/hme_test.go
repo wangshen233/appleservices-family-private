@@ -15,6 +15,7 @@ import (
 func TestHideMyEmailLifecycleBindsCurrentAlias(t *testing.T) {
 	var mu sync.Mutex
 	active := true
+	selectedForward := "primary@example.test"
 	paths := []string{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("dsid") != "123" || r.URL.Query().Get("clientBuildNumber") != hmeBuildNumber {
@@ -27,10 +28,17 @@ func TestHideMyEmailLifecycleBindsCurrentAlias(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/v2/hme/list":
-			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{"hmeEmails": []map[string]any{{"hme": "alias@icloud.com", "label": "shop", "note": "test", "isActive": active, "anonymousId": "private-id"}}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{"forwardToEmails": []string{"primary@example.test", "backup@example.test"}, "selectedForwardTo": selectedForward, "hmeEmails": []map[string]any{{"hme": "alias@icloud.com", "label": "shop", "note": "test", "isActive": active, "anonymousId": "private-id", "forwardToEmail": selectedForward}}}})
 		case "/v1/hme/generate":
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{"hme": "candidate@icloud.com"}})
 		case "/v1/hme/reserve", "/v1/hme/updateMetaData", "/v1/hme/reactivate", "/v1/hme/delete":
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{}})
+		case "/v1/hme/updateForwardTo":
+			var request map[string]string
+			if json.NewDecoder(r.Body).Decode(&request) != nil || request["forwardToEmail"] != "backup@example.test" {
+				t.Fatal("forward target request was not bound to the selected address")
+			}
+			selectedForward = request["forwardToEmail"]
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{}})
 		case "/v1/hme/deactivate":
 			active = false
@@ -51,7 +59,7 @@ func TestHideMyEmailLifecycleBindsCurrentAlias(t *testing.T) {
 	client.http.Jar = jar
 	ctx := context.Background()
 	info, err := client.List(ctx)
-	if err != nil || info.ActiveCount != 1 || len(info.Aliases) != 1 || info.Aliases[0].anonymousID != "private-id" {
+	if err != nil || info.ActiveCount != 1 || len(info.Aliases) != 1 || info.Aliases[0].anonymousID != "private-id" || info.SelectedForward != "primary@example.test" || len(info.ForwardToEmails) != 2 {
 		t.Fatalf("unexpected list info=%#v err=%v", info, err)
 	}
 	candidate, err := client.Generate(ctx, "zh-cn")
@@ -60,6 +68,16 @@ func TestHideMyEmailLifecycleBindsCurrentAlias(t *testing.T) {
 	}
 	if err := client.Reserve(ctx, candidate, "label", "note"); err != nil {
 		t.Fatal(err)
+	}
+	if err := client.UpdateForwardTo(ctx, "unverified@example.test"); err == nil {
+		t.Fatal("unverified forwarding target was accepted")
+	}
+	if err := client.UpdateForwardTo(ctx, "backup@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	forwarded, err := client.List(ctx)
+	if err != nil || forwarded.SelectedForward != "backup@example.test" || forwarded.Aliases[0].ForwardToEmail != "backup@example.test" {
+		t.Fatalf("forwarding change was not verified: %#v err=%v", forwarded, err)
 	}
 	if err := client.Update(ctx, "alias@icloud.com", "updated", "updated note"); err != nil {
 		t.Fatal(err)

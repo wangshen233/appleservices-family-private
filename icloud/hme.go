@@ -49,10 +49,12 @@ type HideMyEmailAlias struct {
 }
 
 type HideMyEmailInfo struct {
-	Aliases       []HideMyEmailAlias `json:"aliases"`
-	ActiveCount   int                `json:"active_count"`
-	InactiveCount int                `json:"inactive_count"`
-	CheckedAt     time.Time          `json:"checked_at"`
+	Aliases         []HideMyEmailAlias `json:"aliases"`
+	ActiveCount     int                `json:"active_count"`
+	InactiveCount   int                `json:"inactive_count"`
+	ForwardToEmails []string           `json:"forward_to_emails,omitempty"`
+	SelectedForward string             `json:"selected_forward_to,omitempty"`
+	CheckedAt       time.Time          `json:"checked_at"`
 }
 
 type hmeCookie struct {
@@ -580,7 +582,9 @@ func (c *HideMyEmailClient) request(ctx context.Context, method, path string, pa
 
 func (c *HideMyEmailClient) List(ctx context.Context) (*HideMyEmailInfo, error) {
 	var result struct {
-		Emails []struct {
+		ForwardToEmails []string `json:"forwardToEmails"`
+		SelectedForward string   `json:"selectedForwardTo"`
+		Emails          []struct {
 			HME, Label, Note                    string
 			IsActive                            bool
 			CreateTimestamp                     int64
@@ -590,7 +594,7 @@ func (c *HideMyEmailClient) List(ctx context.Context) (*HideMyEmailInfo, error) 
 	if err := c.request(ctx, http.MethodGet, "/v2/hme/list", nil, &result); err != nil {
 		return nil, err
 	}
-	info := &HideMyEmailInfo{Aliases: make([]HideMyEmailAlias, 0, len(result.Emails)), CheckedAt: time.Now().UTC()}
+	info := &HideMyEmailInfo{Aliases: make([]HideMyEmailAlias, 0, len(result.Emails)), ForwardToEmails: append([]string(nil), result.ForwardToEmails...), SelectedForward: result.SelectedForward, CheckedAt: time.Now().UTC()}
 	for _, item := range result.Emails {
 		alias := HideMyEmailAlias{Email: item.HME, Label: item.Label, Note: item.Note, Active: item.IsActive, CreateTimestamp: item.CreateTimestamp, ForwardToEmail: item.ForwardToEmail, Origin: item.Origin, anonymousID: item.AnonymousID}
 		if alias.Active {
@@ -601,6 +605,40 @@ func (c *HideMyEmailClient) List(ctx context.Context) (*HideMyEmailInfo, error) 
 		info.Aliases = append(info.Aliases, alias)
 	}
 	return info, nil
+}
+
+func forwardingTargetAvailable(info *HideMyEmailInfo, target string) bool {
+	target = strings.TrimSpace(target)
+	if info == nil || target == "" {
+		return false
+	}
+	if strings.EqualFold(target, strings.TrimSpace(info.SelectedForward)) {
+		return true
+	}
+	for _, candidate := range info.ForwardToEmails {
+		if strings.EqualFold(target, strings.TrimSpace(candidate)) {
+			return true
+		}
+	}
+	return false
+}
+
+// UpdateForwardTo changes the account-wide Hide My Email forwarding target.
+// Apple applies this one target to every alias. The target must be one of the
+// account-associated addresses returned by the live list response.
+func (c *HideMyEmailClient) UpdateForwardTo(ctx context.Context, target string) error {
+	target = strings.TrimSpace(target)
+	info, err := c.List(ctx)
+	if err != nil {
+		return err
+	}
+	if !forwardingTargetAvailable(info, target) {
+		return errors.New("forwarding target is not available for this Apple Account")
+	}
+	if strings.EqualFold(target, strings.TrimSpace(info.SelectedForward)) {
+		return nil
+	}
+	return c.request(ctx, http.MethodPost, "/v1/hme/updateForwardTo", map[string]string{"forwardToEmail": target}, nil)
 }
 
 func (c *HideMyEmailClient) Generate(ctx context.Context, language string) (string, error) {

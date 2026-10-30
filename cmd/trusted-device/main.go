@@ -645,6 +645,18 @@ func run() (runErr error) {
 					return control.Result{Message: "候选地址未确认创建；请刷新列表后核对，不要重复提交", Stage: "hme-reserve"}
 				}
 				pendingHMECandidate = ""
+			case "hme-forward":
+				if alias == "" {
+					return control.Result{Message: "请选择 Apple 返回的转发邮箱", Stage: "hme-forward-validation"}
+				}
+				if forwardErr := hmeClient.UpdateForwardTo(queryCtx, alias); forwardErr != nil {
+					return control.Result{Message: "转发邮箱更新未完成；请重新读取候选地址", Stage: "hme-forward"}
+				}
+				readback, readbackErr := hmeClient.List(queryCtx)
+				if readbackErr != nil || readback == nil || !strings.EqualFold(strings.TrimSpace(readback.SelectedForward), alias) {
+					return control.Result{Message: "Apple 已接收更新，但默认转发邮箱尚未通过回读确认；请勿重复提交", Stage: "hme-forward-readback"}
+				}
+				return control.Result{OK: true, Message: "默认转发邮箱已更新，并通过 Apple 实时列表回读", Stage: "hme-forward-completed", HideMyEmail: readback}
 			case "hme-update":
 				if alias == "" || label == "" {
 					return control.Result{Message: "邮箱和标签不能为空", Stage: "hme-validation"}
