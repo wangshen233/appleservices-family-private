@@ -296,3 +296,17 @@ func TestNextDistinctTrustedCodeWaitsForCodeRotation(t *testing.T) {
 		t.Fatalf("trusted code rotation was not observed: code=%q calls=%d err=%v", code, calls, err)
 	}
 }
+
+func TestWaitForReachableEmailRequiresAuthoritativeReadback(t *testing.T) {
+	checks := 0
+	confirmed := waitForReachableEmail(context.Background(), 3, time.Millisecond, func() bool {
+		checks++
+		return checks == 3
+	})
+	if !confirmed || checks != 3 {
+		t.Fatalf("authoritative reachable email readback was not awaited: confirmed=%v checks=%d", confirmed, checks)
+	}
+	if waitForReachableEmail(context.Background(), 2, time.Millisecond, func() bool { return false }) {
+		t.Fatal("missing authoritative readback was accepted")
+	}
+}

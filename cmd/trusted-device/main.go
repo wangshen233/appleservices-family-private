@@ -663,19 +663,6 @@ func run() (runErr error) {
 				if alias == "" || !strings.Contains(alias, "@") {
 					return control.Result{Message: "请输入要添加并验证的转发邮箱", Stage: "hme-reachable-validation"}
 				}
-				if hmeForwardTargetAvailable(info, alias) {
-					if !strings.EqualFold(strings.TrimSpace(info.SelectedForward), alias) {
-						if forwardErr := hmeClient.UpdateForwardTo(queryCtx, alias); forwardErr != nil {
-							return control.Result{Message: "该联系邮箱已验证，但转发目标更新未完成", Stage: "hme-reachable-existing-forward"}
-						}
-						readback, readbackErr := hmeClient.List(queryCtx)
-						if readbackErr != nil || readback == nil || !strings.EqualFold(strings.TrimSpace(readback.SelectedForward), alias) {
-							return control.Result{Message: "该联系邮箱已验证，Apple 已接收转发更新，但实时回读尚未确认；请勿重复提交", Stage: "hme-reachable-existing-readback"}
-						}
-						info = readback
-					}
-					return control.Result{OK: true, Message: "该联系邮箱已经验证并设为默认转发目标，无需重新登录或发送验证码", Stage: "hme-reachable-existing", HideMyEmail: info}
-				}
 				var clientErr error
 				accountManagementClient, clientErr = icloud.NewAppleAccountClientWithStore(*dir, appleID)
 				if clientErr != nil {
@@ -706,15 +693,10 @@ func run() (runErr error) {
 				target := pendingReachableEmail
 				available := false
 				if verifyErr := accountManagementClient.VerifyReachableEmail(queryCtx, alias); verifyErr != nil {
-					// Apple can apply the reachable-email verification before its
-					// account-management readback catches up. Reconcile against the
-					// authoritative HME forwarding candidates before telling the user
-					// that the one-time email code was rejected.
-					info, err = hmeClient.List(queryCtx)
-					available = reachableVerificationApplied(verifyErr, info, target)
-					if err != nil || !available {
-						return control.Result{Message: "邮箱验证码未被 Apple 接受；没有切换转发目标", Stage: "hme-reachable-verify"}
+					if errors.Is(verifyErr, icloud.ErrReachableEmailReadbackPending) {
+						return control.Result{OK: true, Message: "Apple 已接收邮箱验证，但账户资料尚未完成权威回读；已保留当前挑战，请勿重新发送验证码", Stage: "hme-reachable-verify-pending", HideMyEmail: info}
 					}
+					return control.Result{Message: "邮箱验证码未被 Apple 接受；没有切换转发目标", Stage: "hme-reachable-verify"}
 				}
 				for attempt := 0; !available && attempt < 8; attempt++ {
 					info, err = hmeClient.List(queryCtx)

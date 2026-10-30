@@ -22,7 +22,10 @@ import (
 	"github.com/Laky-64/appleservices/internal/srp"
 )
 
-var ErrAccountManagementAuthenticationRequired = errors.New("Apple Account management authentication required")
+var (
+	ErrAccountManagementAuthenticationRequired = errors.New("Apple Account management authentication required")
+	ErrReachableEmailReadbackPending           = errors.New("reachable email verification readback is pending")
+)
 
 type AppleAccountClient struct {
 	appleID       string
@@ -381,14 +384,15 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 	}
 	c.apiBase = strings.TrimRight(bootstrap.APIURL, "/")
 	c.lastStage = "portal-token"
-	if _, status, err := c.portalRequest(ctx, http.MethodGet, "/account/manage/gs/ws/token", nil, false); err != nil {
-		c.lastHTTP = status
-		return errors.New("Apple Account management session was not established")
-	}
+	_, tokenStatus, tokenErr := c.portalRequest(ctx, http.MethodGet, "/account/manage/gs/ws/token", nil, false)
 	c.lastStage = "manage-data"
 	data, status, err := c.portalRequest(ctx, http.MethodGet, "/account/manage", nil, false)
 	c.lastHTTP = status
 	if err != nil {
+		if tokenErr != nil {
+			c.lastStage, c.lastHTTP = "portal-token", tokenStatus
+			return errors.New("Apple Account management session was not established")
+		}
 		return errors.New("Apple Account management data was unavailable")
 	}
 	var manage struct {
@@ -566,6 +570,10 @@ func (c *AppleAccountClient) VerifyReachableEmail(ctx context.Context, code stri
 	if len(code) < 4 || len(code) > 8 {
 		return errors.New("invalid reachable email verification code")
 	}
+	if c.HasReachableEmail(ctx, c.pendingEmail) {
+		c.pendingEmail, c.pendingVerify = "", nil
+		return nil
+	}
 	var verificationID any
 	if json.Unmarshal(c.pendingVerify, &verificationID) != nil {
 		return errors.New("invalid reachable email challenge")
@@ -574,11 +582,36 @@ func (c *AppleAccountClient) VerifyReachableEmail(ctx context.Context, code stri
 	if _, _, err := c.portalRequest(ctx, http.MethodPut, "/account/manage/email/alternate/verification", payload, true); err != nil {
 		return err
 	}
-	if !c.HasReachableEmail(ctx, c.pendingEmail) {
-		return errors.New("Apple Account did not confirm the reachable email")
+	confirmed := waitForReachableEmail(ctx, 10, time.Second, func() bool {
+		return c.HasReachableEmail(ctx, c.pendingEmail)
+	})
+	if !confirmed {
+		return ErrReachableEmailReadbackPending
 	}
 	c.pendingEmail, c.pendingVerify = "", nil
 	return nil
+}
+
+func waitForReachableEmail(ctx context.Context, attempts int, pollEvery time.Duration, check func() bool) bool {
+	if attempts < 1 || check == nil {
+		return false
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		if check() {
+			return true
+		}
+		if attempt+1 == attempts {
+			break
+		}
+		timer := time.NewTimer(pollEvery)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+	return false
 }
 
 func (c *AppleAccountClient) HasReachableEmail(ctx context.Context, address string) bool {
