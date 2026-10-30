@@ -163,6 +163,7 @@ func (c *AppleAccountClient) Resume(ctx context.Context) error {
 
 func (c *AppleAccountClient) authHeaders(state *hmeAuthState) http.Header {
 	h := make(http.Header)
+	frameID := "auth-" + state.frameID
 	if state.scnt != "" {
 		h.Set("scnt", state.scnt)
 	}
@@ -180,13 +181,15 @@ func (c *AppleAccountClient) authHeaders(state *hmeAuthState) http.Header {
 	h.Set("X-Apple-OAuth-Redirect-URI", "https://account.apple.com")
 	h.Set("X-Apple-OAuth-Response-Mode", "web_message")
 	h.Set("X-Apple-OAuth-Response-Type", "code")
-	h.Set("X-Apple-OAuth-State", "auth-"+state.frameID)
+	h.Set("X-Apple-OAuth-State", frameID)
 	h.Set("X-Apple-Widget-Key", state.clientID)
-	h.Set("X-Apple-Frame-Id", state.frameID)
+	h.Set("X-Apple-App-Id", state.clientID)
+	h.Set("X-Apple-Frame-Id", frameID)
 	h.Set("X-Apple-Domain-Id", "6")
 	h.Set("X-Apple-Locale", "zh_CN")
 	h.Set("X-Apple-Offer-Security-Upgrade", "1")
 	h.Set("X-Apple-Privacy-Consent", "true")
+	h.Set("X-Apple-Privacy-Consent-Accepted", "true")
 	h.Set("X-Apple-I-FD-Client-Info", hmeFDClientInfo())
 	h.Set("X-Requested-With", "XMLHttpRequest")
 	h.Set("Content-Type", "application/json")

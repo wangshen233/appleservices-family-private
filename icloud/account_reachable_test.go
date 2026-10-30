@@ -31,6 +31,24 @@ func TestAccountAuthCapturesOAuthGrantCode(t *testing.T) {
 	}
 }
 
+func TestAccountAuthHeadersMatchCurrentFirstPartyWidget(t *testing.T) {
+	client, err := NewAppleAccountClient("owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &hmeAuthState{frameID: "frame-value", clientID: "service-key"}
+	headers := client.authHeaders(state)
+	if headers.Get("X-Apple-Frame-Id") != "auth-frame-value" || headers.Get("X-Apple-OAuth-State") != "auth-frame-value" {
+		t.Fatal("first-party OAuth frame binding did not match the current Apple widget")
+	}
+	if headers.Get("X-Apple-App-Id") != "service-key" || headers.Get("X-Apple-Widget-Key") != "service-key" {
+		t.Fatal("Apple application binding headers were incomplete")
+	}
+	if headers.Get("X-Apple-Privacy-Consent-Accepted") != "true" {
+		t.Fatal("sign-in v2 privacy consent header was missing")
+	}
+}
+
 func TestAppleAccountManagementSessionPersistsWithoutPassword(t *testing.T) {
 	dir := t.TempDir()
 	client, err := NewAppleAccountClientWithStore(dir, "owner@example.test")
