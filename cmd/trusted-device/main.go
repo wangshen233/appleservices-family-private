@@ -632,6 +632,16 @@ func run() (runErr error) {
 					return control.Result{Message: "候选地址或标签绑定无效，请重新生成", Stage: "hme-binding"}
 				}
 				if reserveErr := hmeClient.Reserve(queryCtx, pendingHMECandidate, label, note); reserveErr != nil {
+					// Apple's reserve endpoint can apply the alias and still return a
+					// failed/late response. Reconcile against a fresh authoritative
+					// list before reporting uncertainty; never submit reserve twice.
+					readbackCtx, stopReadback := context.WithTimeout(actionCtx, 25*time.Second)
+					readback, readbackErr := hmeClient.List(readbackCtx)
+					stopReadback()
+					if readbackErr == nil && reservedAliasPresent(readback, pendingHMECandidate, label, note) {
+						pendingHMECandidate = ""
+						return control.Result{OK: true, Message: "隐藏邮件地址已创建；Apple 创建响应异常，但已通过实时列表回读确认", Stage: "hme-reserve-reconciled", HideMyEmail: readback}
+					}
 					return control.Result{Message: "候选地址未确认创建；请刷新列表后核对，不要重复提交", Stage: "hme-reserve"}
 				}
 				pendingHMECandidate = ""

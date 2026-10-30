@@ -6,10 +6,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Laky-64/appleservices"
 	"github.com/Laky-64/appleservices/gsa"
+	"github.com/Laky-64/appleservices/icloud"
 	"github.com/Laky-64/appleservices/internal/control"
 )
 
@@ -21,6 +23,19 @@ func deviceListFailure(err error) control.Result {
 		return control.Result{Stage: "device_identity_refresh_required", Message: "设备管理登录态需要补齐：请重新连接此账号一次。成功后会保存该凭据，后续重启不再重复输入密码"}
 	}
 	return control.Result{Stage: "device_query_failed", Message: "设备列表获取失败，请稍后重试"}
+}
+
+func reservedAliasPresent(info *icloud.HideMyEmailInfo, candidate, label, note string) bool {
+	if info == nil || strings.TrimSpace(candidate) == "" || strings.TrimSpace(label) == "" {
+		return false
+	}
+	matches := 0
+	for _, alias := range info.Aliases {
+		if strings.EqualFold(strings.TrimSpace(alias.Email), strings.TrimSpace(candidate)) && alias.Label == label && alias.Note == note && alias.Active {
+			matches++
+		}
+	}
+	return matches == 1
 }
 
 type maintainedLogin interface {

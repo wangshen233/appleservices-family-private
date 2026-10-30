@@ -9,6 +9,7 @@ import (
 
 	"github.com/Laky-64/appleservices"
 	"github.com/Laky-64/appleservices/gsa"
+	"github.com/Laky-64/appleservices/icloud"
 )
 
 type fakeMaintainedLogin struct {
@@ -93,6 +94,22 @@ func TestDeviceListFailureExplainsIdentityRefresh(t *testing.T) {
 	}
 	if result := deviceListFailure(errors.New("temporary failure")); result.Stage != "device_query_failed" {
 		t.Fatalf("unrelated failure was misclassified: %#v", result)
+	}
+}
+
+func TestReservedAliasPresentRequiresOneExactActiveMatch(t *testing.T) {
+	alias := icloud.HideMyEmailAlias{Email: "Candidate@icloud.com", Label: "shop", Note: "order", Active: true}
+	if !reservedAliasPresent(&icloud.HideMyEmailInfo{Aliases: []icloud.HideMyEmailAlias{alias}}, "candidate@icloud.com", "shop", "order") {
+		t.Fatal("exact reserved alias was not reconciled")
+	}
+	for _, info := range []*icloud.HideMyEmailInfo{
+		nil,
+		{Aliases: []icloud.HideMyEmailAlias{{Email: alias.Email, Label: alias.Label, Note: alias.Note, Active: false}}},
+		{Aliases: []icloud.HideMyEmailAlias{alias, alias}},
+	} {
+		if reservedAliasPresent(info, "candidate@icloud.com", "shop", "order") {
+			t.Fatal("uncertain reserved alias was accepted")
+		}
 	}
 }
 
