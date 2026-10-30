@@ -53,6 +53,10 @@ func hmeForwardTargetAvailable(info *icloud.HideMyEmailInfo, target string) bool
 	return false
 }
 
+func reachableVerificationApplied(verifyErr error, info *icloud.HideMyEmailInfo, target string) bool {
+	return verifyErr != nil && hmeForwardTargetAvailable(info, target)
+}
+
 type maintainedLogin interface {
 	NeedsTwoFactor() bool
 	Client() (*appleservices.Client, error)

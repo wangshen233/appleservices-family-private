@@ -72,10 +72,6 @@ type hmeSession struct {
 	ClientID       string      `json:"client_id"`
 	ServiceURL     string      `json:"service_url"`
 	AccountCountry string      `json:"account_country,omitempty"`
-	SCNT           string      `json:"scnt,omitempty"`
-	SessionID      string      `json:"session_id,omitempty"`
-	AuthAttributes string      `json:"auth_attributes,omitempty"`
-	FrameID        string      `json:"frame_id,omitempty"`
 	Cookies        []hmeCookie `json:"cookies"`
 	UpdatedAt      time.Time   `json:"updated_at"`
 }
@@ -374,21 +370,13 @@ func (c *HideMyEmailClient) authenticate(ctx context.Context, password string, c
 		if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 			return errors.New("Apple trusted-device code request failed")
 		}
-		baselineCtx, stopBaseline := context.WithTimeout(ctx, 15*time.Second)
-		baseline, baselineErr := codeProvider(baselineCtx)
-		stopBaseline()
-		baseline = strings.TrimSpace(baseline)
-		if baselineErr != nil || len(baseline) != 6 {
+		codeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		code, codeErr := codeProvider(codeCtx)
+		cancel()
+		if codeErr != nil || len(strings.TrimSpace(code)) != 6 {
 			return errors.New("local trusted-device code generation failed")
 		}
-		codeCtx, cancel := context.WithTimeout(ctx, 55*time.Second)
-		code, codeErr := nextDistinctTrustedCode(codeCtx, codeProvider, baseline, time.Second)
-		cancel()
-		baseline = ""
-		if codeErr != nil {
-			return errors.New("local trusted-device code rotation was unavailable")
-		}
-		verifyBody, _ := json.Marshal(map[string]any{"securityCode": map[string]string{"code": code}})
+		verifyBody, _ := json.Marshal(map[string]any{"securityCode": map[string]string{"code": strings.TrimSpace(code)}})
 		response, verifyData, err := c.authRequest(ctx, state, http.MethodPost, c.authBase+"/verify/trusteddevice/securitycode", verifyBody, c.authHeaders(state))
 		for index := range verifyBody {
 			verifyBody[index] = 0
@@ -467,8 +455,7 @@ func (c *HideMyEmailClient) accountLogin(ctx context.Context, state *hmeAuthStat
 	if result.Webservices["premiummailsettings"].URL == "" {
 		return errors.New("iCloud+ Hide My Email is unavailable for this account")
 	}
-	c.session = hmeSession{AppleID: c.appleID, DSID: result.DSInfo.DSID, ClientID: randomHex(16), ServiceURL: strings.TrimRight(result.Webservices["premiummailsettings"].URL, "/"), AccountCountry: state.accountCountry,
-		SCNT: state.scnt, SessionID: state.sessionID, AuthAttributes: state.authAttributes, FrameID: state.frameID}
+	c.session = hmeSession{AppleID: c.appleID, DSID: result.DSInfo.DSID, ClientID: randomHex(16), ServiceURL: strings.TrimRight(result.Webservices["premiummailsettings"].URL, "/"), AccountCountry: state.accountCountry}
 	serviceURL, _ := url.Parse(c.session.ServiceURL)
 	if err := validateHMEWebCookies(c.jar.Cookies(serviceURL)); err != nil {
 		return err

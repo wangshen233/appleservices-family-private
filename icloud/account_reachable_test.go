@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestAccountAuthCapturesOAuthGrantCode(t *testing.T) {
@@ -28,30 +27,6 @@ func TestAccountAuthCapturesOAuthGrantCode(t *testing.T) {
 	response, _, err := client.authRequest(context.Background(), state, http.MethodGet, server.URL, nil, make(http.Header))
 	if err != nil || response.StatusCode != http.StatusOK || state.grantCode != "test-grant" {
 		t.Fatal("OAuth grant code was not captured for portal validation")
-	}
-}
-
-func TestAccountAuthHeadersMatchCurrentFirstPartyWidget(t *testing.T) {
-	client, err := NewAppleAccountClient("owner@example.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	state := &hmeAuthState{frameID: "frame-value", clientID: "service-key"}
-	headers := client.authHeaders(state)
-	if headers.Get("X-Apple-Frame-Id") != "auth-frame-value" || headers.Get("X-Apple-OAuth-State") != "auth-frame-value" {
-		t.Fatal("first-party OAuth frame binding did not match the current Apple widget")
-	}
-	if headers.Get("X-Apple-App-Id") != "service-key" || headers.Get("X-Apple-Widget-Key") != "service-key" {
-		t.Fatal("Apple application binding headers were incomplete")
-	}
-	if headers.Get("X-Apple-Privacy-Consent-Accepted") != "true" {
-		t.Fatal("sign-in v2 privacy consent header was missing")
-	}
-	if headers.Get("Origin") != "https://idmsa.apple.com/appleauth/auth" || headers.Get("Referer") != "https://idmsa.apple.com/appleauth/auth/" {
-		t.Fatal("identity authentication origin was not bound to the Apple auth iframe")
-	}
-	if headers.Get("X-Apple-OAuth-Client-Type") != "firstPartyAuth" || headers.Get("X-Apple-Domain-Id") != "6" || headers.Get("X-Apple-Offer-Security-Upgrade") != "1" {
-		t.Fatal("Apple compatibility authentication headers were incomplete")
 	}
 }
 
@@ -78,33 +53,6 @@ func TestAppleAccountManagementSessionPersistsWithoutPassword(t *testing.T) {
 	}
 	if cookies := restored.jar.Cookies(u); len(cookies) != 1 || cookies[0].Name != "test-session" {
 		t.Fatal("management cookies were not restored")
-	}
-}
-
-func TestAppleAccountClientSeedsOnlyBoundICloudWebCookies(t *testing.T) {
-	dir := t.TempDir()
-	saved := hmeSession{AppleID: "owner@example.test", SCNT: "seed-scnt", SessionID: "seed-session-id", AuthAttributes: "seed-auth", FrameID: "seed-frame", Cookies: []hmeCookie{{Scope: "https://idmsa.apple.com", Name: "seed-session", Value: "seed-value", Path: "/", Secure: true}}}
-	data, _ := json.Marshal(saved)
-	if err := os.WriteFile(filepath.Join(dir, "hme-session.json"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	client, err := NewAppleAccountClientWithStore(dir, "owner@example.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	u, _ := url.Parse("https://idmsa.apple.com")
-	if cookies := client.jar.Cookies(u); len(cookies) != 1 || cookies[0].Name != "seed-session" {
-		t.Fatal("bound iCloud Web cookie was not seeded into account authentication")
-	}
-	if client.seedSCNT != "seed-scnt" || client.seedSession != "seed-session-id" || client.seedAuth != "seed-auth" || client.seedFrame != "seed-frame" {
-		t.Fatal("bound iCloud Web authentication context was not seeded")
-	}
-	other, err := NewAppleAccountClientWithStore(dir, "other@example.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cookies := other.jar.Cookies(u); len(cookies) != 0 {
-		t.Fatal("iCloud Web cookie crossed Apple Account bindings")
 	}
 }
 
@@ -283,12 +231,8 @@ func TestPortalRequestReplaysOfficialManagementContext(t *testing.T) {
 				t.Fatal("unexpected scnt on the first request")
 			}
 			w.Header().Set("scnt", "issued-scnt")
-			w.Header().Set("X-Apple-ID-Session-Id", "issued-session")
-			w.Header().Set("X-Apple-Auth-Attributes", "issued-auth")
 		} else if r.Header.Get("scnt") != "issued-scnt" {
 			t.Fatal("Apple Account scnt was not replayed")
-		} else if r.Header.Get("X-Apple-ID-Session-Id") != "issued-session" || r.Header.Get("X-Apple-Auth-Attributes") != "issued-auth" {
-			t.Fatal("Apple Account authentication context was not replayed")
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"account": map[string]any{}})
 	}))
@@ -332,36 +276,5 @@ func TestReachableEmailDoesNotTreatForbiddenAsPasswordChallenge(t *testing.T) {
 	}
 	if passwordAttempts != 0 {
 		t.Fatal("forbidden response incorrectly triggered a password challenge")
-	}
-}
-
-func TestNextDistinctTrustedCodeWaitsForCodeRotation(t *testing.T) {
-	calls := 0
-	provider := func(context.Context) (string, error) {
-		calls++
-		if calls < 3 {
-			return "123456", nil
-		}
-		return "654321", nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	code, err := nextDistinctTrustedCode(ctx, provider, "123456", time.Millisecond)
-	if err != nil || code != "654321" || calls != 3 {
-		t.Fatalf("trusted code rotation was not observed: code=%q calls=%d err=%v", code, calls, err)
-	}
-}
-
-func TestWaitForReachableEmailRequiresAuthoritativeReadback(t *testing.T) {
-	checks := 0
-	confirmed := waitForReachableEmail(context.Background(), 3, time.Millisecond, func() bool {
-		checks++
-		return checks == 3
-	})
-	if !confirmed || checks != 3 {
-		t.Fatalf("authoritative reachable email readback was not awaited: confirmed=%v checks=%d", confirmed, checks)
-	}
-	if waitForReachableEmail(context.Background(), 2, time.Millisecond, func() bool { return false }) {
-		t.Fatal("missing authoritative readback was accepted")
 	}
 }

@@ -669,25 +669,14 @@ func run() (runErr error) {
 					return control.Result{Message: "无法初始化 Apple 账户管理会话", Stage: "hme-reachable-session"}
 				}
 				if clientErr = accountManagementClient.Resume(queryCtx); clientErr != nil {
-					clientErr = accountManagementClient.ResumeFromICloud(queryCtx)
-				}
-				if clientErr != nil {
 					if password == "" {
 						accountManagementClient = nil
-						return control.Result{Message: "没有可复用的 Apple 账户管理或 iCloud Web 认证上下文；请带密码重新连接当前子号一次", Stage: "reconnect-required"}
+						return control.Result{Message: "没有可复用的 Apple 账户管理会话；请带密码重新连接当前子号一次", Stage: "reconnect-required"}
 					}
-					if refreshErr := hmeClient.Authenticate(queryCtx, password, generateCode); refreshErr != nil {
-						accountManagementClient = nil
-						return control.Result{Message: "iCloud Web 会话上下文续签未完成；没有发送邮箱验证码", Stage: "hme-reachable-context-refresh"}
-					}
-					accountManagementClient, clientErr = icloud.NewAppleAccountClientWithStore(*dir, appleID)
-					if clientErr == nil {
-						clientErr = accountManagementClient.ResumeFromICloud(queryCtx)
-					}
-					if clientErr != nil {
+					if clientErr = accountManagementClient.Authenticate(queryCtx, password, generateCode); clientErr != nil {
 						failureStage, failureHTTP := accountManagementClient.AuthenticationFailure()
 						accountManagementClient = nil
-						return control.Result{Message: "已续签 iCloud Web 会话，但 Apple 账户管理只读授权未完成；没有发送邮箱验证码", Stage: "hme-reachable-reuse-" + failureStage, HTTPStatus: failureHTTP}
+						return control.Result{Message: "Apple 账户管理认证未完成；密码未保存", Stage: "hme-reachable-auth-" + failureStage, HTTPStatus: failureHTTP}
 					}
 				}
 				if clientErr = accountManagementClient.BeginReachableEmail(queryCtx, alias, password); clientErr != nil {
@@ -704,10 +693,15 @@ func run() (runErr error) {
 				target := pendingReachableEmail
 				available := false
 				if verifyErr := accountManagementClient.VerifyReachableEmail(queryCtx, alias); verifyErr != nil {
-					if errors.Is(verifyErr, icloud.ErrReachableEmailReadbackPending) {
-						return control.Result{OK: true, Message: "Apple 已接收邮箱验证，但账户资料尚未完成权威回读；已保留当前挑战，请勿重新发送验证码", Stage: "hme-reachable-verify-pending", HideMyEmail: info}
+					// Apple can apply the reachable-email verification before its
+					// account-management readback catches up. Reconcile against the
+					// authoritative HME forwarding candidates before telling the user
+					// that the one-time email code was rejected.
+					info, err = hmeClient.List(queryCtx)
+					available = reachableVerificationApplied(verifyErr, info, target)
+					if err != nil || !available {
+						return control.Result{Message: "邮箱验证码未被 Apple 接受；没有切换转发目标", Stage: "hme-reachable-verify"}
 					}
-					return control.Result{Message: "邮箱验证码未被 Apple 接受；没有切换转发目标", Stage: "hme-reachable-verify"}
 				}
 				for attempt := 0; !available && attempt < 8; attempt++ {
 					info, err = hmeClient.List(queryCtx)
