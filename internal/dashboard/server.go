@@ -818,13 +818,16 @@ func (s *Server) snapshotFor(ctx context.Context, id string) view {
 	return result
 }
 func (s *Server) Start(ctx context.Context, creds credentials) control.Result {
-	// Start acts on the account that owns the server's own directory. A
-	// registered account is started through startAccount so one account's
-	// credentials can never land in another account's directory.
+	if s.registryNote != "" {
+		return control.Result{Message: s.registryNote}
+	}
+	// Reconnect an existing account without changing its identity. On a fresh
+	// install, create the first account and device.json before Mac APS setup.
 	if account := s.lookup(""); account != nil {
 		return s.startAccount(ctx, account, creds)
 	}
-	return s.startIn(ctx, s.config.Dir, creds, nil)
+	result, _ := s.addAccount(ctx, creds)
+	return result
 }
 
 // startAccount starts one registered account inside its own directory.
