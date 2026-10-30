@@ -1,5 +1,10 @@
 # appleservices — iCloud 登录与 Windows 验证码
 
+> [!WARNING]
+> 本项目是非官方、仅限非商业用途的源码公开项目，与 Apple Inc. 无关联或授权关系。
+> 使用者必须仅操作自己拥有或获明确授权的账号与设备，并自行承担账号风控、锁定、
+> 会话失效、数据丢失、订阅或费用变化等风险。详见[免责声明](DISCLAIMER.md)与[许可说明](#许可与使用边界)。
+
 这个版本提供设备身份认证、Apple ID 登录、双重验证和 iCloud 登录令牌获取。
 普通登录成功获取 `mmeAuthToken` 后结束，不恢复钥匙串，不读取密码、照片或联系人。
 可选的 Windows 验证码入口会登记设备、查询设备状态和监听 AuthKit 登录请求。
@@ -217,7 +222,20 @@ OpenBubbles 1.18.800.0 Windows 模块。此机器已有对应 Store 包缓存，
 
 原始源码保存在 Git 的初始提交 `d6fb108`，也有 `backups/original-source.zip` 备份。
 
-MIT License；与 Apple 无关联。
+## 许可与使用边界
+
+本仓库从当前版本起采用 [PolyForm Noncommercial License 1.0.0](LICENSE)，属于源码公开
+（source-available），不是 OSI 定义的开源软件。允许个人学习、研究、实验以及许可证列明的
+非商业组织用途；不允许以盈利、收费服务、商业产品、商业内部应用或其他预期商业利益为目的使用。
+需要商业使用时，必须事先取得相关权利人的单独书面授权。
+
+仓库包含此前在 MIT 许可下发布的原始代码和其他独立许可组件；既有授权不能被追溯撤销，
+这些部分继续遵循其原许可证。具体范围与版权通知见[第三方通知](THIRD_PARTY_NOTICES.md)。
+
+本项目与 Apple Inc. 没有隶属、合作、授权、认可或担保关系。软件按“现状”提供，不保证可用、
+安全、准确或持续兼容。使用者须仅操作自己拥有或获明确授权的账号、设备和数据，并自行遵守法律与
+Apple 服务条款；在适用法律允许的最大范围内，作者、维护者和贡献者不承担使用或无法使用本项目
+造成的损失。完整风险边界见[免责声明](DISCLAIMER.md)。
 ## Multiple accounts
 
 Each account must run with its own state directory. This keeps the Apple
