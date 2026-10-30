@@ -47,6 +47,9 @@ func TestAccountAuthHeadersMatchCurrentFirstPartyWidget(t *testing.T) {
 	if headers.Get("X-Apple-Privacy-Consent-Accepted") != "true" {
 		t.Fatal("sign-in v2 privacy consent header was missing")
 	}
+	if headers.Get("X-Apple-OAuth-Require-Grant-Code") != "true" {
+		t.Fatal("pure-protocol portal flow did not request a bridge grant")
+	}
 	if headers.Get("Origin") != "https://idmsa.apple.com/appleauth/auth" || headers.Get("Referer") != "https://idmsa.apple.com/appleauth/auth/" {
 		t.Fatal("identity authentication origin was not bound to the Apple auth iframe")
 	}

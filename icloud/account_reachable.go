@@ -180,6 +180,7 @@ func (c *AppleAccountClient) authHeaders(state *hmeAuthState) http.Header {
 	h.Set("X-Apple-OAuth-Client-Id", state.clientID)
 	h.Set("X-Apple-OAuth-Client-Type", "firstPartyAuth")
 	h.Set("X-Apple-OAuth-Redirect-URI", "https://account.apple.com")
+	h.Set("X-Apple-OAuth-Require-Grant-Code", "true")
 	h.Set("X-Apple-OAuth-Response-Mode", "web_message")
 	h.Set("X-Apple-OAuth-Response-Type", "code")
 	h.Set("X-Apple-OAuth-State", frameID)
@@ -369,7 +370,7 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 				"frame_id": {frame}, "iframeId": {frame}, "client_id": {state.clientID},
 				"redirect_uri": {"https://account.apple.com"}, "response_type": {"code"},
 				"response_mode": {"web_message"}, "state": {frame}, "code": {grantCode},
-				"oauthRequireGrantCode": {"false"}, "authVersion": {"8.0.2"},
+				"oauthRequireGrantCode": {"true"}, "authVersion": {"8.0.2"},
 			}
 			response, validateData, validateErr := c.authRequest(ctx, state, http.MethodGet, authBase+"/authorize/validate?"+validateQuery.Encode(), nil, c.authHeaders(state))
 			if validateErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 && portalGrantValidationSucceeded(validateData) {
