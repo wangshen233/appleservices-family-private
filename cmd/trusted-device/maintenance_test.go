@@ -113,6 +113,18 @@ func TestReservedAliasPresentRequiresOneExactActiveMatch(t *testing.T) {
 	}
 }
 
+func TestHMEForwardTargetAvailableUsesAppleCandidates(t *testing.T) {
+	info := &icloud.HideMyEmailInfo{SelectedForward: "primary@example.test", ForwardToEmails: []string{"alternate@example.test"}}
+	for _, target := range []string{"PRIMARY@example.test", " alternate@example.test "} {
+		if !hmeForwardTargetAvailable(info, target) {
+			t.Fatalf("Apple candidate %q was not accepted", target)
+		}
+	}
+	if hmeForwardTargetAvailable(info, "unverified@example.test") {
+		t.Fatal("unverified forwarding target was accepted")
+	}
+}
+
 func TestRuntimeAndStopAreBoundToProcess(t *testing.T) {
 	dir := t.TempDir()
 	status := runtimeStatus{PID: 123, Running: true, Authenticated: true, State: "online"}

@@ -553,7 +553,9 @@ func run() (runErr error) {
 		return control.Result{OK: true, Message: "登录已续期，设备列表已更新"}
 	}
 	var hmeClient *icloud.HideMyEmailClient
+	var accountManagementClient *icloud.AppleAccountClient
 	pendingHMECandidate := ""
+	pendingReachableEmail := ""
 	loadHME := func(actionCtx context.Context) (*icloud.HideMyEmailInfo, error) {
 		if err := requireHMEFamilyMember(*dir, time.Now().UTC()); err != nil {
 			return nil, err
@@ -657,6 +659,62 @@ func run() (runErr error) {
 					return control.Result{Message: "Apple 已接收更新，但默认转发邮箱尚未通过回读确认；请勿重复提交", Stage: "hme-forward-readback"}
 				}
 				return control.Result{OK: true, Message: "默认转发邮箱已更新，并通过 Apple 实时列表回读", Stage: "hme-forward-completed", HideMyEmail: readback}
+			case "hme-reachable-start":
+				if alias == "" || !strings.Contains(alias, "@") {
+					return control.Result{Message: "请输入要添加并验证的转发邮箱", Stage: "hme-reachable-validation"}
+				}
+				if password == "" {
+					return control.Result{Message: "账户资料变更需要一次带密码重连；请重新连接当前子号后再发送邮箱验证码", Stage: "reconnect-required"}
+				}
+				var clientErr error
+				accountManagementClient, clientErr = icloud.NewAppleAccountClient(appleID)
+				if clientErr != nil {
+					return control.Result{Message: "无法初始化 Apple 账户管理会话", Stage: "hme-reachable-session"}
+				}
+				if clientErr = accountManagementClient.Authenticate(queryCtx, password, generateCode); clientErr != nil {
+					accountManagementClient = nil
+					return control.Result{Message: "Apple 账户管理认证未完成；登录会话和密码未保存", Stage: "hme-reachable-auth"}
+				}
+				if clientErr = accountManagementClient.BeginReachableEmail(queryCtx, alias); clientErr != nil {
+					accountManagementClient = nil
+					return control.Result{Message: "Apple 未发送目标邮箱验证码；未修改账户资料", Stage: "hme-reachable-send"}
+				}
+				pendingReachableEmail = alias
+				return control.Result{OK: true, Message: "Apple 已向目标邮箱发送验证码；请输入邮件中的验证码完成添加并切换转发", Stage: "hme-reachable-code", HideMyEmail: info}
+			case "hme-reachable-verify":
+				if accountManagementClient == nil || pendingReachableEmail == "" {
+					return control.Result{Message: "当前没有待完成的目标邮箱验证，请重新发送验证码", Stage: "hme-reachable-missing"}
+				}
+				if verifyErr := accountManagementClient.VerifyReachableEmail(queryCtx, alias); verifyErr != nil {
+					return control.Result{Message: "邮箱验证码未被 Apple 接受；没有切换转发目标", Stage: "hme-reachable-verify"}
+				}
+				target := pendingReachableEmail
+				available := false
+				for attempt := 0; attempt < 8; attempt++ {
+					info, err = hmeClient.List(queryCtx)
+					if err == nil && hmeForwardTargetAvailable(info, target) {
+						available = true
+						break
+					}
+					select {
+					case <-queryCtx.Done():
+						attempt = 8
+					case <-time.After(time.Second):
+					}
+				}
+				if !available {
+					pendingReachableEmail = ""
+					return control.Result{OK: true, Message: "联系邮箱已添加并验证，但 Apple 尚未把它同步到隐私邮箱候选；请稍后读取地址再切换", Stage: "hme-reachable-added", HideMyEmail: info}
+				}
+				if forwardErr := hmeClient.UpdateForwardTo(queryCtx, target); forwardErr != nil {
+					return control.Result{Message: "联系邮箱已添加，但转发目标更新未完成；请从候选列表手动保存", Stage: "hme-reachable-forward"}
+				}
+				readback, readbackErr := hmeClient.List(queryCtx)
+				if readbackErr != nil || readback == nil || !strings.EqualFold(strings.TrimSpace(readback.SelectedForward), target) {
+					return control.Result{Message: "联系邮箱已添加，Apple 已接收转发更新，但实时回读尚未确认；请勿重复提交", Stage: "hme-reachable-readback"}
+				}
+				pendingReachableEmail = ""
+				return control.Result{OK: true, Message: "联系邮箱已添加并验证，所有隐私邮箱已切换到新目标并通过实时回读", Stage: "hme-reachable-completed", HideMyEmail: readback}
 			case "hme-update":
 				if alias == "" || label == "" {
 					return control.Result{Message: "邮箱和标签不能为空", Stage: "hme-validation"}

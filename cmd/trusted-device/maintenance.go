@@ -38,6 +38,21 @@ func reservedAliasPresent(info *icloud.HideMyEmailInfo, candidate, label, note s
 	return matches == 1
 }
 
+func hmeForwardTargetAvailable(info *icloud.HideMyEmailInfo, target string) bool {
+	if info == nil || strings.TrimSpace(target) == "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(info.SelectedForward), strings.TrimSpace(target)) {
+		return true
+	}
+	for _, candidate := range info.ForwardToEmails {
+		if strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(target)) {
+			return true
+		}
+	}
+	return false
+}
+
 type maintainedLogin interface {
 	NeedsTwoFactor() bool
 	Client() (*appleservices.Client, error)
