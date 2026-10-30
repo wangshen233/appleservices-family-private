@@ -177,6 +177,7 @@ func (c *AppleAccountClient) authHeaders(state *hmeAuthState) http.Header {
 		h.Set("X-Apple-Session-Token", state.sessionToken)
 	}
 	h.Set("X-Apple-OAuth-Client-Id", state.clientID)
+	h.Set("X-Apple-OAuth-Client-Type", "firstPartyAuth")
 	h.Set("X-Apple-OAuth-Redirect-URI", "https://account.apple.com")
 	h.Set("X-Apple-OAuth-Response-Mode", "web_message")
 	h.Set("X-Apple-OAuth-Response-Type", "code")
@@ -184,9 +185,13 @@ func (c *AppleAccountClient) authHeaders(state *hmeAuthState) http.Header {
 	h.Set("X-Apple-Widget-Key", state.clientID)
 	h.Set("X-Apple-App-Id", state.clientID)
 	h.Set("X-Apple-Frame-Id", frameID)
+	h.Set("X-Apple-Domain-Id", "6")
+	h.Set("X-Apple-Locale", "zh_CN")
+	h.Set("X-Apple-Offer-Security-Upgrade", "1")
 	h.Set("X-Apple-Privacy-Consent", "true")
 	h.Set("X-Apple-Privacy-Consent-Accepted", "true")
 	h.Set("X-Apple-I-FD-Client-Info", hmeFDClientInfo())
+	h.Set("X-Requested-With", "XMLHttpRequest")
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "application/json")
 	h.Set("Origin", "https://account.apple.com")
@@ -311,37 +316,28 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 		if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 			return errors.New("Apple Account trusted-device challenge failed")
 		}
-		previousCode := ""
-		verified := false
-		for attempt := 0; attempt < 2; attempt++ {
-			codeTimeout := 60 * time.Second
-			if attempt > 0 {
-				codeTimeout = 35 * time.Second
-			}
-			codeCtx, cancel := context.WithTimeout(ctx, codeTimeout)
-			code, codeErr := nextDistinctTrustedCode(codeCtx, codeProvider, previousCode, time.Second)
-			cancel()
-			if codeErr != nil {
-				previousCode = ""
-				return errors.New("local trusted-device code generation failed")
-			}
-			verifyBody, _ := json.Marshal(map[string]any{"securityCode": map[string]string{"code": code}})
-			c.lastStage = "trusted-code"
-			response, verifyData, err := c.authRequest(ctx, state, http.MethodPost, authBase+"/verify/trusteddevice/securitycode", verifyBody, c.authHeaders(state))
-			for index := range verifyBody {
-				verifyBody[index] = 0
-			}
-			previousCode, code = code, ""
-			if err == nil && ((response.StatusCode >= 200 && response.StatusCode < 300) || (response.StatusCode == http.StatusConflict && state.sessionToken != "" && bytes.Contains(verifyData, []byte(`"valid":true`)))) {
-				verified = true
-				break
-			}
-			if response == nil || response.StatusCode != http.StatusBadRequest {
-				break
-			}
+		baselineCtx, stopBaseline := context.WithTimeout(ctx, 15*time.Second)
+		baseline, baselineErr := codeProvider(baselineCtx)
+		stopBaseline()
+		baseline = strings.TrimSpace(baseline)
+		if baselineErr != nil || len(baseline) != 6 {
+			return errors.New("local trusted-device code generation failed")
 		}
-		previousCode = ""
-		if !verified {
+		codeCtx, cancel := context.WithTimeout(ctx, 55*time.Second)
+		code, codeErr := nextDistinctTrustedCode(codeCtx, codeProvider, baseline, time.Second)
+		cancel()
+		baseline = ""
+		if codeErr != nil {
+			return errors.New("local trusted-device code rotation was unavailable")
+		}
+		verifyBody, _ := json.Marshal(map[string]any{"securityCode": map[string]string{"code": code}})
+		c.lastStage = "trusted-code"
+		response, verifyData, err := c.authRequest(ctx, state, http.MethodPost, authBase+"/verify/trusteddevice/securitycode", verifyBody, c.authHeaders(state))
+		for index := range verifyBody {
+			verifyBody[index] = 0
+		}
+		code = ""
+		if err != nil || !((response.StatusCode >= 200 && response.StatusCode < 300) || (response.StatusCode == http.StatusConflict && state.sessionToken != "" && bytes.Contains(verifyData, []byte(`"valid":true`)))) {
 			return errors.New("Apple Account rejected the trusted-device verification code")
 		}
 	} else if response.StatusCode < 200 || response.StatusCode >= 300 {
