@@ -36,6 +36,12 @@ type AppleAccountClient struct {
 	apiBase       string
 	apiKey        string
 	portalSCNT    string
+	portalSession string
+	portalAuth    string
+	seedSCNT      string
+	seedSession   string
+	seedAuth      string
+	seedFrame     string
 	pendingEmail  string
 	pendingVerify json.RawMessage
 	lastStage     string
@@ -47,6 +53,8 @@ type savedAppleAccountSession struct {
 	APIBase   string      `json:"api_base"`
 	APIKey    string      `json:"api_key"`
 	SCNT      string      `json:"scnt,omitempty"`
+	SessionID string      `json:"session_id,omitempty"`
+	AuthAttrs string      `json:"auth_attributes,omitempty"`
 	Cookies   []hmeCookie `json:"cookies"`
 	UpdatedAt time.Time   `json:"updated_at"`
 }
@@ -99,6 +107,8 @@ func (c *AppleAccountClient) loadHMESeed(path string) error {
 	if json.Unmarshal(data, &saved) != nil || !strings.EqualFold(strings.TrimSpace(saved.AppleID), c.appleID) {
 		return errors.New("saved iCloud Web session binding is invalid")
 	}
+	c.seedSCNT, c.seedSession = saved.SCNT, saved.SessionID
+	c.seedAuth, c.seedFrame = saved.AuthAttributes, saved.FrameID
 	for _, item := range saved.Cookies {
 		u, parseErr := url.Parse(item.Scope)
 		if parseErr != nil || u.Scheme != "https" || u.Hostname() == "" || item.Name == "" || item.Value == "" {
@@ -125,6 +135,7 @@ func (c *AppleAccountClient) loadSavedSession() error {
 		return errors.New("saved Apple Account session binding is invalid")
 	}
 	c.apiBase, c.apiKey, c.portalSCNT = strings.TrimRight(saved.APIBase, "/"), saved.APIKey, saved.SCNT
+	c.portalSession, c.portalAuth = saved.SessionID, saved.AuthAttrs
 	for _, item := range saved.Cookies {
 		u, parseErr := url.Parse(item.Scope)
 		if parseErr != nil || u.Scheme != "https" || u.Hostname() == "" || item.Name == "" {
@@ -139,7 +150,7 @@ func (c *AppleAccountClient) saveSession() error {
 	if c.sessionPath == "" || c.apiBase == "" || c.apiKey == "" {
 		return nil
 	}
-	saved := savedAppleAccountSession{AppleID: c.appleID, APIBase: c.apiBase, APIKey: c.apiKey, SCNT: c.portalSCNT, UpdatedAt: time.Now().UTC()}
+	saved := savedAppleAccountSession{AppleID: c.appleID, APIBase: c.apiBase, APIKey: c.apiKey, SCNT: c.portalSCNT, SessionID: c.portalSession, AuthAttrs: c.portalAuth, UpdatedAt: time.Now().UTC()}
 	scopes := []string{"https://appleid.apple.com", "https://idmsa.apple.com", c.apiBase}
 	seen := map[string]bool{}
 	for _, scope := range scopes {
@@ -185,6 +196,62 @@ func (c *AppleAccountClient) ensurePortalSession(ctx context.Context) error {
 // It performs no login and no account mutation.
 func (c *AppleAccountClient) Resume(ctx context.Context) error {
 	return c.ensurePortalSession(ctx)
+}
+
+// ResumeFromICloud authorizes the Apple Account portal from the same
+// account's saved iCloud Web authentication context. It is read-only and
+// submits neither a password nor a verification code.
+func (c *AppleAccountClient) ResumeFromICloud(ctx context.Context) error {
+	if c.seedSCNT == "" || c.seedSession == "" || c.seedAuth == "" {
+		return ErrAccountManagementAuthenticationRequired
+	}
+	state := &hmeAuthState{scnt: c.seedSCNT, sessionID: c.seedSession, authAttributes: c.seedAuth, frameID: randomHex(16)}
+	navigationHeaders := make(http.Header)
+	navigationHeaders.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	navigationHeaders.Set("User-Agent", hmeWebUserAgent)
+	c.lastStage, c.lastHTTP = "reuse-portal", 0
+	response, _, err := c.authRequest(ctx, state, http.MethodGet, "https://account.apple.com/", nil, navigationHeaders)
+	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+		return ErrAccountManagementAuthenticationRequired
+	}
+	c.lastStage = "reuse-bootstrap"
+	response, bootstrapData, err := c.authRequest(ctx, state, http.MethodGet, "https://account.apple.com/bootstrap/portal", nil, navigationHeaders)
+	var bootstrap portalBootstrap
+	if err != nil || response.StatusCode != http.StatusOK || json.Unmarshal(bootstrapData, &bootstrap) != nil || bootstrap.ServiceKey == "" || bootstrap.ServiceURL == "" || bootstrap.APIURL == "" {
+		return ErrAccountManagementAuthenticationRequired
+	}
+	state.clientID = bootstrap.ServiceKey
+	c.authBase = strings.TrimRight(bootstrap.ServiceURL, "/") + "/auth"
+	frame := "auth-" + state.frameID
+	query := url.Values{"frame_id": {frame}, "language": {"en_US"}, "skVersion": {"7"}, "iframeId": {frame}, "client_id": {state.clientID}, "redirect_uri": {"https://account.apple.com"}, "response_type": {"code"}, "response_mode": {"web_message"}, "state": {frame}, "authVersion": {"8.0.2"}}
+	c.lastStage = "reuse-authorize"
+	response, _, err = c.authRequest(ctx, state, http.MethodGet, c.authBase+"/authorize/signin?"+query.Encode(), nil, c.authHeaders(state))
+	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+		return ErrAccountManagementAuthenticationRequired
+	}
+	c.apiBase = strings.TrimRight(bootstrap.APIURL, "/")
+	c.portalSCNT, c.portalSession, c.portalAuth = state.scnt, state.sessionID, state.authAttributes
+	c.lastStage = "reuse-portal-token"
+	if _, _, err := c.portalRequest(ctx, http.MethodGet, "/account/manage/gs/ws/token", nil, false); err != nil {
+		return ErrAccountManagementAuthenticationRequired
+	}
+	c.lastStage = "reuse-manage-data"
+	data, _, err := c.portalRequest(ctx, http.MethodGet, "/account/manage", nil, false)
+	if err != nil {
+		return ErrAccountManagementAuthenticationRequired
+	}
+	var manage struct {
+		APIKey string `json:"apiKey"`
+	}
+	if json.Unmarshal(data, &manage) != nil || manage.APIKey == "" {
+		return ErrAccountManagementAuthenticationRequired
+	}
+	c.apiKey = manage.APIKey
+	if err := c.saveSession(); err != nil {
+		return errors.New("Apple Account management session could not be saved")
+	}
+	c.lastStage, c.lastHTTP = "", 0
+	return nil
 }
 
 func (c *AppleAccountClient) authHeaders(state *hmeAuthState) http.Header {
@@ -487,6 +554,12 @@ func (c *AppleAccountClient) portalRequest(ctx context.Context, method, path str
 	if c.portalSCNT != "" {
 		request.Header.Set("scnt", c.portalSCNT)
 	}
+	if c.portalSession != "" {
+		request.Header.Set("X-Apple-ID-Session-Id", c.portalSession)
+	}
+	if c.portalAuth != "" {
+		request.Header.Set("X-Apple-Auth-Attributes", c.portalAuth)
+	}
 	if requireAPIKey {
 		if c.apiKey == "" {
 			return nil, 0, ErrAccountManagementAuthenticationRequired
@@ -500,6 +573,12 @@ func (c *AppleAccountClient) portalRequest(ctx context.Context, method, path str
 	defer response.Body.Close()
 	if scnt := response.Header.Get("scnt"); scnt != "" {
 		c.portalSCNT = scnt
+	}
+	if sessionID := response.Header.Get("X-Apple-ID-Session-Id"); sessionID != "" {
+		c.portalSession = sessionID
+	}
+	if authAttributes := response.Header.Get("X-Apple-Auth-Attributes"); authAttributes != "" {
+		c.portalAuth = authAttributes
 	}
 	c.lastHTTP = response.StatusCode
 	data, readErr := io.ReadAll(io.LimitReader(response.Body, (4<<20)+1))

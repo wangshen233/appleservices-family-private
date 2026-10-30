@@ -83,7 +83,7 @@ func TestAppleAccountManagementSessionPersistsWithoutPassword(t *testing.T) {
 
 func TestAppleAccountClientSeedsOnlyBoundICloudWebCookies(t *testing.T) {
 	dir := t.TempDir()
-	saved := hmeSession{AppleID: "owner@example.test", Cookies: []hmeCookie{{Scope: "https://idmsa.apple.com", Name: "seed-session", Value: "seed-value", Path: "/", Secure: true}}}
+	saved := hmeSession{AppleID: "owner@example.test", SCNT: "seed-scnt", SessionID: "seed-session-id", AuthAttributes: "seed-auth", FrameID: "seed-frame", Cookies: []hmeCookie{{Scope: "https://idmsa.apple.com", Name: "seed-session", Value: "seed-value", Path: "/", Secure: true}}}
 	data, _ := json.Marshal(saved)
 	if err := os.WriteFile(filepath.Join(dir, "hme-session.json"), data, 0600); err != nil {
 		t.Fatal(err)
@@ -95,6 +95,9 @@ func TestAppleAccountClientSeedsOnlyBoundICloudWebCookies(t *testing.T) {
 	u, _ := url.Parse("https://idmsa.apple.com")
 	if cookies := client.jar.Cookies(u); len(cookies) != 1 || cookies[0].Name != "seed-session" {
 		t.Fatal("bound iCloud Web cookie was not seeded into account authentication")
+	}
+	if client.seedSCNT != "seed-scnt" || client.seedSession != "seed-session-id" || client.seedAuth != "seed-auth" || client.seedFrame != "seed-frame" {
+		t.Fatal("bound iCloud Web authentication context was not seeded")
 	}
 	other, err := NewAppleAccountClientWithStore(dir, "other@example.test")
 	if err != nil {
@@ -280,8 +283,12 @@ func TestPortalRequestReplaysOfficialManagementContext(t *testing.T) {
 				t.Fatal("unexpected scnt on the first request")
 			}
 			w.Header().Set("scnt", "issued-scnt")
+			w.Header().Set("X-Apple-ID-Session-Id", "issued-session")
+			w.Header().Set("X-Apple-Auth-Attributes", "issued-auth")
 		} else if r.Header.Get("scnt") != "issued-scnt" {
 			t.Fatal("Apple Account scnt was not replayed")
+		} else if r.Header.Get("X-Apple-ID-Session-Id") != "issued-session" || r.Header.Get("X-Apple-Auth-Attributes") != "issued-auth" {
+			t.Fatal("Apple Account authentication context was not replayed")
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"account": map[string]any{}})
 	}))
