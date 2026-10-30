@@ -8,6 +8,24 @@ import (
 	"testing"
 )
 
+func TestAccountAuthCapturesOAuthGrantCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Apple-OAuth-Grant-Code", "test-grant")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client, err := NewAppleAccountClient("owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http = server.Client()
+	state := &hmeAuthState{}
+	response, _, err := client.authRequest(context.Background(), state, http.MethodGet, server.URL, nil, make(http.Header))
+	if err != nil || response.StatusCode != http.StatusOK || state.grantCode != "test-grant" {
+		t.Fatal("OAuth grant code was not captured for portal validation")
+	}
+}
+
 func TestReachableEmailChallengeBindsAddressAndVerifiesReadback(t *testing.T) {
 	const address = "forward@example.test"
 	verified := false

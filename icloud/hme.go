@@ -180,6 +180,7 @@ type hmeAuthState struct {
 	frameID, clientID, srpSession  string
 	authAttributes, sessionID      string
 	scnt, sessionToken, trustToken string
+	grantCode                      string
 	accountCountry                 string
 }
 
@@ -190,6 +191,7 @@ func (c *HideMyEmailClient) captureAuth(state *hmeAuthState, response *http.Resp
 		"scnt":                       &state.scnt,
 		"X-Apple-Session-Token":      &state.sessionToken,
 		"X-Apple-TwoSV-Trust-Token":  &state.trustToken,
+		"X-Apple-OAuth-Grant-Code":   &state.grantCode,
 		"X-Apple-ID-Account-Country": &state.accountCountry,
 	} {
 		if value := response.Header.Get(name); value != "" {

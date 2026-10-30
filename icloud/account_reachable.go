@@ -103,6 +103,7 @@ func (c *AppleAccountClient) authRequest(ctx context.Context, state *hmeAuthStat
 		"X-Apple-Auth-Attributes": &state.authAttributes, "X-Apple-ID-Session-Id": &state.sessionID,
 		"scnt": &state.scnt, "X-Apple-Session-Token": &state.sessionToken,
 		"X-Apple-TwoSV-Trust-Token": &state.trustToken, "X-Apple-ID-Account-Country": &state.accountCountry,
+		"X-Apple-OAuth-Grant-Code": &state.grantCode,
 	} {
 		if value := response.Header.Get(name); value != "" {
 			*target = value
@@ -226,6 +227,20 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 	response, _, err = c.authRequest(ctx, state, http.MethodGet, authBase+"/2sv/trust", nil, c.authHeaders(state))
 	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return errors.New("Apple Account web session trust failed")
+	}
+	if state.grantCode == "" {
+		return errors.New("Apple Account OAuth grant code was unavailable")
+	}
+	c.lastStage = "oauth-validate"
+	validateQuery := url.Values{
+		"frame_id": {frame}, "iframeId": {frame}, "client_id": {state.clientID},
+		"redirect_uri": {"https://account.apple.com"}, "response_type": {"code"},
+		"response_mode": {"web_message"}, "state": {frame}, "code": {state.grantCode},
+		"authVersion": {"8.0.2"},
+	}
+	response, _, err = c.authRequest(ctx, state, http.MethodGet, authBase+"/authorize/validate?"+validateQuery.Encode(), nil, c.authHeaders(state))
+	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+		return errors.New("Apple Account OAuth grant validation failed")
 	}
 	c.apiBase = strings.TrimRight(bootstrap.APIURL, "/")
 	c.lastStage = "portal-token"
