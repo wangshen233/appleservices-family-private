@@ -69,6 +69,17 @@ func TestRenewalRequiresFullSameAccountAuthentication(t *testing.T) {
 	}
 }
 
+func TestPasswordlessRenewalSkipsDeviceRegistration(t *testing.T) {
+	login := &fakeMaintainedLogin{account: "same"}
+	got, _, err := renewSessionMode(func() (maintainedLogin, error) { return login, nil }, "same", appleservices.DeviceRegistration{}, false)
+	if err != nil || got != login {
+		t.Fatalf("passwordless renewal failed: %v", err)
+	}
+	if login.registered != 0 {
+		t.Fatal("passwordless renewal attempted device registration")
+	}
+}
+
 func TestRuntimeAndStopAreBoundToProcess(t *testing.T) {
 	dir := t.TempDir()
 	status := runtimeStatus{PID: 123, Running: true, Authenticated: true, State: "online"}

@@ -842,6 +842,17 @@ func (s *Server) startAccount(ctx context.Context, account *Account, creds crede
 }
 
 func (s *Server) startIn(ctx context.Context, dir string, creds credentials, account *Account) control.Result {
+	return s.startInMode(ctx, dir, creds, account, false)
+}
+
+func (s *Server) startSavedAccount(ctx context.Context, account *Account) control.Result {
+	if account == nil || !verifiedGSACheckpointReady(account.Dir, account.AppleID) || !acceptedCheckpointReady(account.Dir, account.AppleID) {
+		return control.Result{Message: "已保存登录会话不可用，请输入当前密码重新连接"}
+	}
+	return s.startInMode(ctx, account.Dir, credentials{AppleID: account.AppleID}, account, true)
+}
+
+func (s *Server) startInMode(ctx context.Context, dir string, creds credentials, account *Account, resume bool) control.Result {
 	if !s.launchMu.TryLock() {
 		return control.Result{Message: "正在启动，请稍等"}
 	}
@@ -853,7 +864,7 @@ func (s *Server) startIn(ctx context.Context, dir string, creds credentials, acc
 			return control.Result{OK: true, Message: "已连接到现有后台"}
 		}
 	}
-	if strings.TrimSpace(creds.AppleID) == "" || creds.Password == "" {
+	if strings.TrimSpace(creds.AppleID) == "" || (!resume && creds.Password == "") {
 		return control.Result{Message: "请输入 Apple 账户和密码"}
 	}
 	if creds.TwoFactor == "" {
@@ -893,6 +904,9 @@ func (s *Server) startIn(ctx context.Context, dir string, creds credentials, acc
 	defer diagnostic.Close()
 	command := exec.Command(s.config.Worker, "-native-adi", "-background", "-control-api", "-gui-auth", "-dir", dir, "-adi-dll", s.config.Library, "-python", s.config.Python)
 	command.Args = append(command.Args, "-twofactor", creds.TwoFactor)
+	if resume {
+		command.Args = append(command.Args, "-resume-session")
+	}
 	configureProcess(command)
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
@@ -900,7 +914,10 @@ func (s *Server) startIn(ctx context.Context, dir string, creds credentials, acc
 			command.Env = append(command.Env, entry)
 		}
 	}
-	command.Env = append(command.Env, "APPLESERVICES_APPLEID="+strings.TrimSpace(creds.AppleID), "APPLESERVICES_PASSWORD="+creds.Password)
+	command.Env = append(command.Env, "APPLESERVICES_APPLEID="+strings.TrimSpace(creds.AppleID))
+	if !resume {
+		command.Env = append(command.Env, "APPLESERVICES_PASSWORD="+creds.Password)
+	}
 	command.Stdout, command.Stderr = output, diagnostic
 	if command.Start() != nil {
 		return control.Result{Message: "后台启动失败，请检查本机依赖"}
@@ -914,6 +931,9 @@ func (s *Server) startIn(ctx context.Context, dir string, creds credentials, acc
 			s.setMessage(account, message)
 		}
 	}()
+	if resume {
+		return control.Result{OK: true, Message: "正在恢复已保存的 Apple 登录会话"}
+	}
 	return control.Result{OK: true, Message: "正在连接 Apple，请稍等"}
 }
 
@@ -934,6 +954,8 @@ func lastProcessError(path string) string {
 			return "所选目录缺少有效设备身份，请选择已有账号，或通过添加账号建立身份"
 		case strings.Contains(line, "APPLESERVICES_APPLEID and APPLESERVICES_PASSWORD are required"):
 			return "请重新输入当前账号密码"
+		case strings.Contains(line, "saved login session cannot be restored"):
+			return "Apple 已保存会话失效，请输入当前账号密码重新连接"
 		case strings.Contains(line, "ec=-22406") && strings.Contains(line, "correct password"):
 			return "Apple 拒绝了当前密码，请确认使用的是这个账号的最新密码，并关闭密码管理器的旧自动填充"
 		case strings.Contains(line, "ec=-22981") && strings.Contains(line, "tooManyCodesSent=true"):
@@ -989,6 +1011,20 @@ func (s *Server) Bootstrap(ctx context.Context, appleID, password string) {
 			}
 		}()
 	}
+	go func() {
+		s.accountsMu.Lock()
+		accounts := append([]*Account(nil), s.accounts...)
+		s.accountsMu.Unlock()
+		for _, account := range accounts {
+			if ctx.Err() != nil || s.accountStatus(account).Running || !acceptedCheckpointReady(account.Dir, account.AppleID) || !verifiedGSACheckpointReady(account.Dir, account.AppleID) {
+				continue
+			}
+			result := s.startSavedAccount(ctx, account)
+			if !result.OK && result.Message != "正在启动，请稍等" {
+				s.setMessage(account, result.Message)
+			}
+		}
+	}()
 }
 func (s *Server) stop(ctx context.Context) error { return s.stopIn(ctx, s.config.Dir) }
 

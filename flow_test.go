@@ -144,6 +144,55 @@ func TestClientRetainsStorageBuyServiceToken(t *testing.T) {
 	}
 }
 
+func TestResumeLoginUsesBoundSavedSessionsWithoutPasswordHandshake(t *testing.T) {
+	t.Setenv("APPLESERVICES_FRESH_GSA", "1")
+	store := &memoryStore{session: &Session{AppleID: "owner@example.test", DSID: "gsa-account", Tokens: map[string]string{
+		"com.apple.gs.idms.pet":           "pet",
+		"com.apple.gs.idms.hb":            "heartbeat",
+		"com.apple.gs.appleid.auth":       "account-token",
+		"com.apple.gs.icloud.storage.buy": "storage-token",
+	}}}
+	backend := &fakeBackend{}
+	accepted := RestoredICloudSession{DSID: "icloud-account", ADSID: "gsa-account", MMEAuthToken: "mme-token", CloudKitToken: "cloudkit-token", ServiceData: map[string]any{"quota": true}}
+	login, err := ResumeLogin("OWNER@example.test", store, accepted, testOptions(backend, testDelegate)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend.calls != 0 || login.NeedsTwoFactor() {
+		t.Fatal("passwordless resume performed a password login or requested 2FA")
+	}
+	client, err := login.Client()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.DSID != accepted.DSID || client.ADSID != accepted.ADSID || client.MMEAuthToken != accepted.MMEAuthToken || client.StorageBuyToken != "storage-token" {
+		t.Fatalf("restored client was not account-bound: %#v", client)
+	}
+	if err := login.SaveSession(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResumeLoginRejectsCrossAccountOrIncompleteState(t *testing.T) {
+	complete := map[string]string{"com.apple.gs.idms.pet": "pet", "com.apple.gs.idms.hb": "hb", "com.apple.gs.appleid.auth": "auth"}
+	for _, test := range []struct {
+		name     string
+		session  *Session
+		accepted RestoredICloudSession
+	}{
+		{"wrong-account", &Session{AppleID: "other@example.test", DSID: "gsa", Tokens: complete}, RestoredICloudSession{DSID: "icloud", ADSID: "gsa", MMEAuthToken: "mme", ServiceData: map[string]any{}}},
+		{"wrong-adsid", &Session{AppleID: "owner@example.test", DSID: "gsa", Tokens: complete}, RestoredICloudSession{DSID: "icloud", ADSID: "other", MMEAuthToken: "mme", ServiceData: map[string]any{}}},
+		{"missing-heartbeat", &Session{AppleID: "owner@example.test", DSID: "gsa", Tokens: map[string]string{"com.apple.gs.idms.pet": "pet", "com.apple.gs.appleid.auth": "auth"}}, RestoredICloudSession{DSID: "icloud", ADSID: "gsa", MMEAuthToken: "mme", ServiceData: map[string]any{}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &memoryStore{session: test.session}
+			if _, err := ResumeLogin("owner@example.test", store, test.accepted, testOptions(&fakeBackend{}, testDelegate)...); err == nil {
+				t.Fatal("unsafe saved session was resumed")
+			}
+		})
+	}
+}
+
 func TestCheckpointRequiresAuthenticatedClient(t *testing.T) {
 	store := &memoryStore{}
 	backend := &fakeBackend{results: []*gsa.LoginResult{testResult(false)}}

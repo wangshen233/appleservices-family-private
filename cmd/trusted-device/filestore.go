@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Laky-64/appleservices"
 )
@@ -12,8 +14,9 @@ type fileStore struct {
 	dir string
 }
 
-func (s fileStore) devicePath() string  { return filepath.Join(s.dir, "device.json") }
-func (s fileStore) sessionPath() string { return filepath.Join(s.dir, "session.json") }
+func (s fileStore) devicePath() string   { return filepath.Join(s.dir, "device.json") }
+func (s fileStore) sessionPath() string  { return filepath.Join(s.dir, "session.json") }
+func (s fileStore) acceptedPath() string { return filepath.Join(s.dir, "icloud-accepted.json") }
 
 func (s fileStore) LoadDevice() (*appleservices.Device, error) {
 	data, err := os.ReadFile(s.devicePath())
@@ -63,4 +66,29 @@ func (s fileStore) SaveSession(sess *appleservices.Session) error {
 		return err
 	}
 	return writeJSONFile(s.sessionPath(), sess)
+}
+
+func (s fileStore) LoadAcceptedICloud() (appleservices.RestoredICloudSession, error) {
+	data, err := os.ReadFile(s.acceptedPath())
+	if err != nil {
+		return appleservices.RestoredICloudSession{}, err
+	}
+	var checkpoint struct {
+		Session struct {
+			AppleID string            `json:"AppleID"`
+			DSID    string            `json:"DSID"`
+			Tokens  map[string]string `json:"Tokens"`
+		} `json:"session"`
+		ADSID       string         `json:"adsid"`
+		ServiceData map[string]any `json:"service-data"`
+	}
+	if len(data) > 2<<20 || json.Unmarshal(data, &checkpoint) != nil {
+		return appleservices.RestoredICloudSession{}, errors.New("accepted iCloud checkpoint is invalid")
+	}
+	saved, err := s.LoadSession()
+	if err != nil || saved == nil || !strings.EqualFold(checkpoint.Session.AppleID, saved.AppleID) || checkpoint.ADSID != saved.DSID {
+		return appleservices.RestoredICloudSession{}, errors.New("accepted iCloud checkpoint account binding failed")
+	}
+	return appleservices.RestoredICloudSession{DSID: checkpoint.Session.DSID, ADSID: checkpoint.ADSID,
+		MMEAuthToken: checkpoint.Session.Tokens["mmeAuthToken"], CloudKitToken: checkpoint.Session.Tokens["cloudKitToken"], ServiceData: checkpoint.ServiceData}, nil
 }

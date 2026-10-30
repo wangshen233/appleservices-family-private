@@ -49,13 +49,13 @@ type Login struct {
 	gsaCheckpointed bool
 }
 
-func BeginLogin(creds Credentials, store Store, opts ...Option) (*Login, error) {
+func prepareLogin(creds Credentials, store Store, requirePassword bool, opts ...Option) (*Login, *Session, error) {
 	if store == nil {
-		return nil, errors.New("appleservices: store is required")
+		return nil, nil, errors.New("appleservices: store is required")
 	}
 	creds.AppleID = strings.TrimSpace(creds.AppleID)
-	if creds.AppleID == "" || creds.Password == "" {
-		return nil, errors.New("appleservices: Apple ID and password are required")
+	if creds.AppleID == "" || requirePassword && creds.Password == "" {
+		return nil, nil, errors.New("appleservices: Apple ID and password are required")
 	}
 	o := options{newBackend: defaultBackend, fetchDelegate: icloud.FetchDelegateTokens}
 	for _, opt := range opts {
@@ -67,7 +67,7 @@ func BeginLogin(creds Credentials, store Store, opts ...Option) (*Login, error) 
 	} else {
 		dev, err := store.LoadDevice()
 		if err != nil {
-			return nil, fmt.Errorf("appleservices: load device: %w", err)
+			return nil, nil, fmt.Errorf("appleservices: load device: %w", err)
 		}
 		st := anisette.NewState()
 		if dev != nil {
@@ -81,11 +81,11 @@ func BeginLogin(creds Credentials, store Store, opts ...Option) (*Login, error) 
 	}
 	sess, err := store.LoadSession()
 	if err != nil {
-		return nil, fmt.Errorf("appleservices: load session: %w", err)
+		return nil, nil, fmt.Errorf("appleservices: load session: %w", err)
 	}
 	var gsess *gsa.Session
 	// Older, unbound sessions and sessions belonging to another account are ignored.
-	if sess != nil && strings.EqualFold(sess.AppleID, creds.AppleID) && strings.TrimSpace(os.Getenv("APPLESERVICES_FRESH_GSA")) != "1" {
+	if sess != nil && strings.EqualFold(sess.AppleID, creds.AppleID) && (!requirePassword || strings.TrimSpace(os.Getenv("APPLESERVICES_FRESH_GSA")) != "1") {
 		s := toGSASession(*sess)
 		gsess = &s
 	}
@@ -112,16 +112,55 @@ func BeginLogin(creds Credentials, store Store, opts ...Option) (*Login, error) 
 	if len(o.pushToken) > 0 {
 		backend, ok := l.backend.(interface{ SetPushToken([]byte) error })
 		if !ok {
-			return nil, errors.New("appleservices: backend cannot bind an APS token")
+			return nil, nil, errors.New("appleservices: backend cannot bind an APS token")
 		}
 		if err := backend.SetPushToken(o.pushToken); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+	}
+	return l, sess, nil
+}
+
+func BeginLogin(creds Credentials, store Store, opts ...Option) (*Login, error) {
+	l, _, err := prepareLogin(creds, store, true, opts...)
+	if err != nil {
+		return nil, err
 	}
 	// Cached cookies may avoid a new 2FA prompt, but never establish login on their own.
 	if err := l.authenticate(); err != nil {
 		return nil, err
 	}
+	return l, nil
+}
+
+// ResumeLogin restores a passwordless local worker from an account-bound GSA
+// session and an Apple-accepted iCloud checkpoint. It performs no password
+// handshake and never weakens the binding between the account, GSA ADSID and
+// iCloud delegate ADSID.
+func ResumeLogin(appleID string, store Store, accepted RestoredICloudSession, opts ...Option) (*Login, error) {
+	l, saved, err := prepareLogin(Credentials{AppleID: appleID}, store, false, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if saved == nil || !strings.EqualFold(saved.AppleID, l.creds.AppleID) || saved.DSID == "" || saved.DSID != accepted.ADSID {
+		return nil, errors.New("appleservices: saved account session binding is invalid")
+	}
+	pet := saved.Tokens["com.apple.gs.idms.pet"]
+	heartbeat := saved.Tokens["com.apple.gs.idms.hb"]
+	accountToken := saved.Tokens["com.apple.gs.appleid.auth"]
+	if pet == "" || heartbeat == "" || accountToken == "" || accepted.DSID == "" || accepted.MMEAuthToken == "" || accepted.ServiceData == nil {
+		return nil, errors.New("appleservices: saved login session is incomplete")
+	}
+	services := make(map[string]any, len(saved.Tokens))
+	for service, token := range saved.Tokens {
+		if token != "" {
+			services[service] = map[string]any{"token": token}
+		}
+	}
+	l.result = &gsa.LoginResult{SessionPayload: map[string]any{"adsid": saved.DSID, "t": services}}
+	l.adsid, l.needsTwoFactor, l.gsaCheckpointed = saved.DSID, false, true
+	l.client = &Client{DSID: accepted.DSID, ADSID: accepted.ADSID, MMEAuthToken: accepted.MMEAuthToken,
+		StorageBuyToken: saved.Tokens["com.apple.gs.icloud.storage.buy"], CloudKitToken: accepted.CloudKitToken, serviceData: accepted.ServiceData}
 	return l, nil
 }
 
@@ -171,6 +210,9 @@ func (l *Login) NeedsTwoFactor() bool { return l.needsTwoFactor }
 // an already configured account. It is used by the dashboard when Apple asks
 // for a device code again; it never opens or drives the official client.
 func (l *Login) BeginAccountValidation() error {
+	if l.creds.Password == "" {
+		return errors.New("appleservices: password is required to start a new account validation challenge")
+	}
 	res, err := l.backend.Login(l.creds.AppleID, l.creds.Password)
 	if err != nil {
 		return fmt.Errorf("appleservices: validation login: %w", err)

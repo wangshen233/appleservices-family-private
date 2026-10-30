@@ -48,6 +48,18 @@ type Credentials struct {
 	Password string
 }
 
+// RestoredICloudSession is an account-bound, previously accepted iCloud
+// delegate checkpoint. It lets a local worker resume without retaining the
+// Apple Account password. Callers must load it from the same account directory
+// as Session and Device.
+type RestoredICloudSession struct {
+	DSID          string
+	ADSID         string
+	MMEAuthToken  string
+	CloudKitToken string
+	ServiceData   map[string]any
+}
+
 type Option func(*options)
 
 type options struct {

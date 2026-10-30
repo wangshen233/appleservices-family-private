@@ -62,6 +62,7 @@ func run() (runErr error) {
 	refreshEvery := flag.Duration("refresh-every", 10*time.Minute, "refresh account authentication, registration and device status at this interval")
 	controlAPI := flag.Bool("control-api", false, "enable authenticated local dashboard control")
 	guiAuth := flag.Bool("gui-auth", false, "complete initial SMS verification through the dashboard")
+	resumeSession := flag.Bool("resume-session", false, "restore the account-bound GSA and accepted iCloud sessions without a password")
 	flag.Parse()
 	if *background {
 		*controlAPI = true
@@ -159,7 +160,7 @@ func run() (runErr error) {
 		return nil
 	}
 	appleID, password := os.Getenv("APPLESERVICES_APPLEID"), os.Getenv("APPLESERVICES_PASSWORD")
-	if appleID == "" || password == "" {
+	if appleID == "" || (!*resumeSession && password == "") {
 		return errors.New("APPLESERVICES_APPLEID and APPLESERVICES_PASSWORD are required")
 	}
 	os.Unsetenv("APPLESERVICES_APPLEID")
@@ -284,7 +285,16 @@ func run() (runErr error) {
 	if err := status.save(*dir); err != nil {
 		return err
 	}
-	login, err := appleservices.BeginLogin(appleservices.Credentials{AppleID: appleID, Password: password}, store, options...)
+	var login *appleservices.Login
+	if *resumeSession {
+		accepted, loadErr := store.LoadAcceptedICloud()
+		if loadErr != nil {
+			return errors.New("saved login session cannot be restored; reconnect with the current password")
+		}
+		login, err = appleservices.ResumeLogin(appleID, store, accepted, options...)
+	} else {
+		login, err = appleservices.BeginLogin(appleservices.Credentials{AppleID: appleID, Password: password}, store, options...)
+	}
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -395,7 +405,7 @@ func run() (runErr error) {
 	// The reference client sends GSA postdata after 2FA and before requesting
 	// iCloud delegates. For the explicit NAC diagnostic, allow an isolated
 	// delegate retry because accountsetupcheck does not mutate registration.
-	if strings.TrimSpace(os.Getenv("APPLESERVICES_SKIP_DEVICE_REGISTRATION")) != "1" {
+	if !*resumeSession && strings.TrimSpace(os.Getenv("APPLESERVICES_SKIP_DEVICE_REGISTRATION")) != "1" {
 		if err := login.PrepareDeviceRegistration(registration); err != nil {
 			return err
 		}
@@ -510,10 +520,17 @@ func run() (runErr error) {
 	refresh := time.NewTicker(*refreshEvery)
 	defer refresh.Stop()
 	beginRenewal := func() (maintainedLogin, error) {
+		if *resumeSession {
+			accepted, err := store.LoadAcceptedICloud()
+			if err != nil {
+				return nil, err
+			}
+			return appleservices.ResumeLogin(appleID, store, accepted, options...)
+		}
 		return appleservices.BeginLogin(appleservices.Credentials{AppleID: appleID, Password: password}, store, options...)
 	}
 	renew := func() control.Result {
-		renewed, devices, err := renewSession(beginRenewal, accountID, registration)
+		renewed, devices, err := renewSessionMode(beginRenewal, accountID, registration, !*resumeSession)
 		if err != nil {
 			status.State = "refresh_failed"
 			if errors.Is(err, errVerificationRequired) {

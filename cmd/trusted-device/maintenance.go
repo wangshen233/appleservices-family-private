@@ -27,6 +27,10 @@ type maintainedLogin interface {
 // A renewal is adopted only after authentication, registration and device-list
 // access all succeed. Callers keep the old session on a transient error.
 func renewSession(begin func() (maintainedLogin, error), accountID string, registration appleservices.DeviceRegistration) (maintainedLogin, []appleservices.AccountDevice, error) {
+	return renewSessionMode(begin, accountID, registration, true)
+}
+
+func renewSessionMode(begin func() (maintainedLogin, error), accountID string, registration appleservices.DeviceRegistration, register bool) (maintainedLogin, []appleservices.AccountDevice, error) {
 	login, err := begin()
 	if err != nil {
 		return nil, nil, err
@@ -41,8 +45,10 @@ func renewSession(begin func() (maintainedLogin, error), accountID string, regis
 	if client == nil || client.ADSID != accountID {
 		return nil, nil, errors.New("session renewal returned a different account")
 	}
-	if err := login.RegisterDevice(registration); err != nil {
-		return nil, nil, err
+	if register {
+		if err := login.RegisterDevice(registration); err != nil {
+			return nil, nil, err
+		}
 	}
 	devices, err := login.AccountDevices()
 	if err != nil {
