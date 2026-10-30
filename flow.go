@@ -157,7 +157,11 @@ func ResumeLogin(appleID string, store Store, accepted RestoredICloudSession, op
 			services[service] = map[string]any{"token": token}
 		}
 	}
-	l.result = &gsa.LoginResult{SessionPayload: map[string]any{"adsid": saved.DSID, "t": services}}
+	payload := map[string]any{"adsid": saved.DSID, "t": services}
+	if saved.DeviceIdentityToken != "" {
+		payload["GsIdmsToken"] = saved.DeviceIdentityToken
+	}
+	l.result = &gsa.LoginResult{SessionPayload: payload}
 	l.adsid, l.needsTwoFactor, l.gsaCheckpointed = saved.DSID, false, true
 	l.client = &Client{DSID: accepted.DSID, ADSID: accepted.ADSID, MMEAuthToken: accepted.MMEAuthToken,
 		StorageBuyToken: saved.Tokens["com.apple.gs.icloud.storage.buy"], CloudKitToken: accepted.CloudKitToken, serviceData: accepted.ServiceData}
@@ -316,6 +320,7 @@ func (l *Login) checkpointVerifiedGSA() error {
 	}
 	sess := fromGSASession(gsess)
 	sess.AppleID = l.creds.AppleID
+	sess.DeviceIdentityToken = spdString(l.result.SessionPayload, "GsIdmsToken")
 	if err := l.store.SaveSession(&sess); err != nil {
 		return fmt.Errorf("appleservices: save verified GSA session: %w", err)
 	}
@@ -380,6 +385,7 @@ func (l *Login) Client() (*Client, error) {
 	}
 	sess := fromGSASession(gsess)
 	sess.AppleID = l.creds.AppleID
+	sess.DeviceIdentityToken = spdString(l.result.SessionPayload, "GsIdmsToken")
 	if err := l.store.SaveSession(&sess); err != nil {
 		return nil, fmt.Errorf("appleservices: save session: %w", err)
 	}
@@ -401,6 +407,7 @@ func (l *Login) SaveSession() error {
 	}
 	sess := fromGSASession(gsess)
 	sess.AppleID = l.creds.AppleID
+	sess.DeviceIdentityToken = spdString(l.result.SessionPayload, "GsIdmsToken")
 	if err := l.store.SaveSession(&sess); err != nil {
 		return fmt.Errorf("appleservices: save session: %w", err)
 	}

@@ -111,7 +111,7 @@ func TestNoTwoFactorCheckpointsGSABeforeICloudLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.MMEAuthToken == "" || s.saves != 2 || s.session.AppleID != "owner@example.test" {
+	if c.MMEAuthToken == "" || s.saves != 2 || s.session.AppleID != "owner@example.test" || s.session.DeviceIdentityToken != "test-idms" {
 		t.Fatal("successful login did not return tokens and save account-bound session")
 	}
 	if _, err := l.Client(); err != nil {
@@ -146,7 +146,7 @@ func TestClientRetainsStorageBuyServiceToken(t *testing.T) {
 
 func TestResumeLoginUsesBoundSavedSessionsWithoutPasswordHandshake(t *testing.T) {
 	t.Setenv("APPLESERVICES_FRESH_GSA", "1")
-	store := &memoryStore{session: &Session{AppleID: "owner@example.test", DSID: "gsa-account", Tokens: map[string]string{
+	store := &memoryStore{session: &Session{AppleID: "owner@example.test", DSID: "gsa-account", DeviceIdentityToken: "saved-idms", Tokens: map[string]string{
 		"com.apple.gs.idms.pet":           "pet",
 		"com.apple.gs.idms.hb":            "heartbeat",
 		"com.apple.gs.appleid.auth":       "account-token",
@@ -170,6 +170,23 @@ func TestResumeLoginUsesBoundSavedSessionsWithoutPasswordHandshake(t *testing.T)
 	}
 	if err := login.SaveSession(); err != nil {
 		t.Fatal(err)
+	}
+	if store.session.DeviceIdentityToken != "saved-idms" || spdString(login.result.SessionPayload, "GsIdmsToken") != "saved-idms" {
+		t.Fatal("passwordless resume dropped the saved device identity token")
+	}
+}
+
+func TestResumeLoginWithoutLegacyDeviceIdentityRequiresOneReconnect(t *testing.T) {
+	store := &memoryStore{session: &Session{AppleID: "owner@example.test", DSID: "gsa-account", Tokens: map[string]string{
+		"com.apple.gs.idms.pet": "pet", "com.apple.gs.idms.hb": "heartbeat", "com.apple.gs.appleid.auth": "account-token",
+	}}}
+	accepted := RestoredICloudSession{DSID: "icloud-account", ADSID: "gsa-account", MMEAuthToken: "mme-token", ServiceData: map[string]any{"quota": true}}
+	login, err := ResumeLogin("owner@example.test", store, accepted, testOptions(&fakeBackend{}, testDelegate)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := login.AccountDevices(); !errors.Is(err, ErrDeviceIdentityRefreshRequired) {
+		t.Fatalf("legacy session did not request a device identity refresh: %v", err)
 	}
 }
 

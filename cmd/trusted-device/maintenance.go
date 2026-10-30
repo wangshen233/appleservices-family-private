@@ -9,9 +9,19 @@ import (
 	"time"
 
 	"github.com/Laky-64/appleservices"
+	"github.com/Laky-64/appleservices/gsa"
+	"github.com/Laky-64/appleservices/internal/control"
 )
 
 var errVerificationRequired = errors.New("account verification is required; complete it in the dashboard")
+
+func deviceListFailure(err error) control.Result {
+	var requestErr *gsa.DeviceRequestError
+	if errors.Is(err, appleservices.ErrDeviceIdentityRefreshRequired) || errors.As(err, &requestErr) && requestErr.HTTPStatus == 401 {
+		return control.Result{Stage: "device_identity_refresh_required", Message: "设备管理登录态需要补齐：请重新连接此账号一次。成功后会保存该凭据，后续重启不再重复输入密码"}
+	}
+	return control.Result{Stage: "device_query_failed", Message: "设备列表获取失败，请稍后重试"}
+}
 
 type maintainedLogin interface {
 	NeedsTwoFactor() bool

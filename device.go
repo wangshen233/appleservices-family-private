@@ -2,9 +2,17 @@ package appleservices
 
 import (
 	"errors"
-	"github.com/Laky-64/appleservices/gsa"
+	"fmt"
 	"strings"
+
+	"github.com/Laky-64/appleservices/gsa"
 )
+
+// ErrDeviceIdentityRefreshRequired means the durable iCloud/service session is
+// still usable, but the Apple Account device-management identity was not saved
+// by an older build (or is no longer available). A fresh account login can
+// replenish it without discarding the accepted iCloud session.
+var ErrDeviceIdentityRefreshRequired = errors.New("appleservices: device-management identity refresh required")
 
 type identityAnisette struct {
 	provider gsa.AnisetteProvider
@@ -57,6 +65,9 @@ func (l *Login) PrepareDeviceRegistration(registration DeviceRegistration) error
 func (l *Login) AccountDevices() ([]AccountDevice, error) {
 	if l.client == nil || l.needsTwoFactor {
 		return nil, errors.New("appleservices: complete iCloud authentication before reading device status")
+	}
+	if l.result == nil || l.result.SessionPayload == nil || spdString(l.result.SessionPayload, "GsIdmsToken") == "" {
+		return nil, fmt.Errorf("%w: saved session predates device identity persistence", ErrDeviceIdentityRefreshRequired)
 	}
 	backend, ok := l.backend.(interface {
 		AccountDevices(map[string]any) ([]gsa.AccountDevice, error)

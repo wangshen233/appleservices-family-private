@@ -1068,7 +1068,7 @@ func run() (runErr error) {
 		if action == "devices" {
 			devices, err := active.AccountDevices()
 			if err != nil {
-				return control.Result{Message: "设备列表获取失败，请稍后重试"}
+				return deviceListFailure(err)
 			}
 			status.setDevices(devices, *name)
 			if panel != nil {

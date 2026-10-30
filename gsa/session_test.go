@@ -13,6 +13,25 @@ func (failedProvider) Headers() (map[string]string, error) {
 	return nil, errors.New("test unavailable")
 }
 
+type snapshotProvider struct{ calls int }
+
+func (p *snapshotProvider) Headers() (map[string]string, error) {
+	p.calls++
+	return map[string]string{"X-Apple-I-MD": "test-current"}, nil
+}
+
+func TestSnapshotFetchesHeadersWhenRestoredSessionHasNoHeaderCache(t *testing.T) {
+	provider := &snapshotProvider{}
+	c := NewClient(provider)
+	session, err := c.Snapshot("test-dsid", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 1 || session.AnisetteHeaders["X-Apple-I-MD"] != "test-current" {
+		t.Fatal("snapshot did not initialize its authenticated header cache")
+	}
+}
+
 func TestRefreshRejectsStaleHeaders(t *testing.T) {
 	c := NewClient(failedProvider{})
 	c.cachedAnisetteHeaders = map[string]string{"X-Apple-I-MD": "test-stale"}

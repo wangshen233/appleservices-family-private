@@ -37,7 +37,9 @@ func (c *Client) requestURLs() []string {
 
 func (c *Client) Snapshot(dsid string, tokens map[string]string) (Session, error) {
 	if c.cachedAnisetteHeaders == nil {
-		return Session{}, fmt.Errorf("gsa: cannot snapshot session before anisette headers are fetched")
+		if _, err := c.anisetteHeaders(); err != nil {
+			return Session{}, fmt.Errorf("gsa: cannot snapshot session before anisette headers are fetched: %w", err)
+		}
 	}
 	cookies := map[string][]CookieKV{}
 	seen := map[string]bool{}

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Laky-64/appleservices"
+	"github.com/Laky-64/appleservices/gsa"
 )
 
 type fakeMaintainedLogin struct {
@@ -77,6 +78,21 @@ func TestPasswordlessRenewalSkipsDeviceRegistration(t *testing.T) {
 	}
 	if login.registered != 0 {
 		t.Fatal("passwordless renewal attempted device registration")
+	}
+}
+
+func TestDeviceListFailureExplainsIdentityRefresh(t *testing.T) {
+	for _, err := range []error{
+		appleservices.ErrDeviceIdentityRefreshRequired,
+		&gsa.DeviceRequestError{HTTPStatus: 401},
+	} {
+		result := deviceListFailure(err)
+		if result.Stage != "device_identity_refresh_required" || result.Message == "" {
+			t.Fatalf("identity refresh was hidden as a generic failure: %#v", result)
+		}
+	}
+	if result := deviceListFailure(errors.New("temporary failure")); result.Stage != "device_query_failed" {
+		t.Fatalf("unrelated failure was misclassified: %#v", result)
 	}
 }
 

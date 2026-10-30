@@ -126,6 +126,11 @@ async function action(name,extra={},options={}){
     if(result.family){const checkedAt=new Date().toISOString();if(current){current.family=result.family;current.family_checked_at=checkedAt;current.family_stale=false;}renderFamily(result.family,{checkedAt,stale:false});}
     if(!result.ok){
       const detail=(result.stage?' · '+result.stage:'')+(result.http_status?' · HTTP '+result.http_status:'')+(result.apple_hint?' · '+result.apple_hint:'');
+	  if(name==='devices'&&result.stage==='device_identity_refresh_required'){
+		notice(result.message||'设备管理登录态需要补齐',true);
+		openLogin('reconnect');
+		return;
+	  }
       if(name==='storage-authenticate'){
         $('storeAuthSummary').textContent=(result.message||'购买会话验证未完成')+detail;
         $('storeAuthForm').hidden=result.stage!=='purchase-store-2fa';

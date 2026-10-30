@@ -31,10 +31,11 @@ type Device struct {
 }
 
 type Session struct {
-	AppleID string
-	DSID    string
-	Cookies []Cookie
-	Tokens  map[string]string `json:",omitempty"`
+	AppleID             string
+	DSID                string
+	Cookies             []Cookie
+	Tokens              map[string]string `json:",omitempty"`
+	DeviceIdentityToken string            `json:",omitempty"`
 }
 
 type Cookie struct {
