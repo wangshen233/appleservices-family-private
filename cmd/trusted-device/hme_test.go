@@ -2,13 +2,25 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/Laky-64/appleservices/icloud"
 	"github.com/Laky-64/appleservices/internal/control"
 )
+
+func TestReachableVerificationReconcilesAppliedAppleMutation(t *testing.T) {
+	info := &icloud.HideMyEmailInfo{ForwardToEmails: []string{"primary@example.test", "new@example.test"}}
+	if !reachableVerificationApplied(errors.New("account readback is stale"), info, "NEW@example.test") {
+		t.Fatal("Apple-applied reachable email was not reconciled from HME candidates")
+	}
+	if reachableVerificationApplied(errors.New("verification rejected"), info, "missing@example.test") {
+		t.Fatal("missing HME candidate was treated as a successful verification")
+	}
+}
 
 func TestRequireHMEFamilyMemberRejectsOrganizerAndStaleCache(t *testing.T) {
 	now := time.Now().UTC()

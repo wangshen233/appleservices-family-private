@@ -690,12 +690,20 @@ func run() (runErr error) {
 				if accountManagementClient == nil || pendingReachableEmail == "" {
 					return control.Result{Message: "当前没有待完成的目标邮箱验证，请重新发送验证码", Stage: "hme-reachable-missing"}
 				}
-				if verifyErr := accountManagementClient.VerifyReachableEmail(queryCtx, alias); verifyErr != nil {
-					return control.Result{Message: "邮箱验证码未被 Apple 接受；没有切换转发目标", Stage: "hme-reachable-verify"}
-				}
 				target := pendingReachableEmail
 				available := false
-				for attempt := 0; attempt < 8; attempt++ {
+				if verifyErr := accountManagementClient.VerifyReachableEmail(queryCtx, alias); verifyErr != nil {
+					// Apple can apply the reachable-email verification before its
+					// account-management readback catches up. Reconcile against the
+					// authoritative HME forwarding candidates before telling the user
+					// that the one-time email code was rejected.
+					info, err = hmeClient.List(queryCtx)
+					available = reachableVerificationApplied(verifyErr, info, target)
+					if err != nil || !available {
+						return control.Result{Message: "邮箱验证码未被 Apple 接受；没有切换转发目标", Stage: "hme-reachable-verify"}
+					}
+				}
+				for attempt := 0; !available && attempt < 8; attempt++ {
 					info, err = hmeClient.List(queryCtx)
 					if err == nil && hmeForwardTargetAvailable(info, target) {
 						available = true
