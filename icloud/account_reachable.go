@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,14 +26,25 @@ var ErrAccountManagementAuthenticationRequired = errors.New("Apple Account manag
 
 type AppleAccountClient struct {
 	appleID       string
+	sessionPath   string
 	http          *http.Client
 	jar           http.CookieJar
 	apiBase       string
 	apiKey        string
+	portalSCNT    string
 	pendingEmail  string
 	pendingVerify json.RawMessage
 	lastStage     string
 	lastHTTP      int
+}
+
+type savedAppleAccountSession struct {
+	AppleID   string      `json:"apple_id"`
+	APIBase   string      `json:"api_base"`
+	APIKey    string      `json:"api_key"`
+	SCNT      string      `json:"scnt,omitempty"`
+	Cookies   []hmeCookie `json:"cookies"`
+	UpdatedAt time.Time   `json:"updated_at"`
 }
 
 type portalBootstrap struct {
@@ -41,6 +54,16 @@ type portalBootstrap struct {
 }
 
 func NewAppleAccountClient(appleID string) (*AppleAccountClient, error) {
+	return newAppleAccountClient("", appleID)
+}
+
+// NewAppleAccountClientWithStore restores an account-bound management session
+// from the local account directory. It never stores or loads a password.
+func NewAppleAccountClientWithStore(accountDir, appleID string) (*AppleAccountClient, error) {
+	return newAppleAccountClient(accountDir, appleID)
+}
+
+func newAppleAccountClient(accountDir, appleID string) (*AppleAccountClient, error) {
 	appleID = strings.TrimSpace(appleID)
 	if appleID == "" {
 		return nil, errors.New("Apple Account binding is incomplete")
@@ -48,7 +71,91 @@ func NewAppleAccountClient(appleID string) (*AppleAccountClient, error) {
 	jar, _ := cookiejar.New(nil)
 	transport := gsa.AppleRootTransport().(*http.Transport)
 	transport.Proxy = nil
-	return &AppleAccountClient{appleID: appleID, jar: jar, http: &http.Client{Jar: jar, Transport: transport, Timeout: 35 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	sessionPath := ""
+	if strings.TrimSpace(accountDir) != "" {
+		sessionPath = filepath.Join(accountDir, "account-management-session.json")
+	}
+	c := &AppleAccountClient{appleID: appleID, sessionPath: sessionPath, jar: jar, http: &http.Client{Jar: jar, Transport: transport, Timeout: 35 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	_ = c.loadSavedSession()
+	return c, nil
+}
+
+func (c *AppleAccountClient) loadSavedSession() error {
+	if c.sessionPath == "" {
+		return os.ErrNotExist
+	}
+	data, err := os.ReadFile(c.sessionPath)
+	if err != nil {
+		return err
+	}
+	if len(data) > 2<<20 {
+		return errors.New("saved Apple Account session is too large")
+	}
+	var saved savedAppleAccountSession
+	if json.Unmarshal(data, &saved) != nil || !strings.EqualFold(saved.AppleID, c.appleID) || saved.APIBase == "" || saved.APIKey == "" {
+		return errors.New("saved Apple Account session binding is invalid")
+	}
+	c.apiBase, c.apiKey, c.portalSCNT = strings.TrimRight(saved.APIBase, "/"), saved.APIKey, saved.SCNT
+	for _, item := range saved.Cookies {
+		u, parseErr := url.Parse(item.Scope)
+		if parseErr != nil || u.Scheme != "https" || u.Hostname() == "" || item.Name == "" {
+			continue
+		}
+		c.jar.SetCookies(u, []*http.Cookie{{Name: item.Name, Value: item.Value, Path: item.Path, Secure: item.Secure, Expires: item.Expires}})
+	}
+	return nil
+}
+
+func (c *AppleAccountClient) saveSession() error {
+	if c.sessionPath == "" || c.apiBase == "" || c.apiKey == "" {
+		return nil
+	}
+	saved := savedAppleAccountSession{AppleID: c.appleID, APIBase: c.apiBase, APIKey: c.apiKey, SCNT: c.portalSCNT, UpdatedAt: time.Now().UTC()}
+	scopes := []string{"https://appleid.apple.com", "https://idmsa.apple.com", c.apiBase}
+	seen := map[string]bool{}
+	for _, scope := range scopes {
+		u, err := url.Parse(scope)
+		if err != nil || u.Hostname() == "" {
+			continue
+		}
+		origin := "https://" + u.Hostname()
+		for _, cookie := range c.jar.Cookies(u) {
+			key := origin + "\x00" + cookie.Name
+			if cookie.Value == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			saved.Cookies = append(saved.Cookies, hmeCookie{Scope: origin, Name: cookie.Name, Value: cookie.Value, Path: cookie.Path, Secure: cookie.Secure, Expires: cookie.Expires})
+		}
+	}
+	data, err := json.Marshal(saved)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(c.sessionPath), 0700); err != nil {
+		return err
+	}
+	temp := c.sessionPath + ".tmp"
+	if err := os.WriteFile(temp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(temp, c.sessionPath)
+}
+
+func (c *AppleAccountClient) ensurePortalSession(ctx context.Context) error {
+	if c.apiBase == "" || c.apiKey == "" {
+		return ErrAccountManagementAuthenticationRequired
+	}
+	if _, _, err := c.portalRequest(ctx, http.MethodGet, "/account/manage", nil, true); err != nil {
+		return ErrAccountManagementAuthenticationRequired
+	}
+	return nil
+}
+
+// Resume verifies that a saved account-management session is still accepted.
+// It performs no login and no account mutation.
+func (c *AppleAccountClient) Resume(ctx context.Context) error {
+	return c.ensurePortalSession(ctx)
 }
 
 func (c *AppleAccountClient) authHeaders(state *hmeAuthState) http.Header {
@@ -68,7 +175,6 @@ func (c *AppleAccountClient) authHeaders(state *hmeAuthState) http.Header {
 	h.Set("X-Apple-OAuth-Client-Id", state.clientID)
 	h.Set("X-Apple-OAuth-Client-Type", "firstPartyAuth")
 	h.Set("X-Apple-OAuth-Redirect-URI", "https://account.apple.com")
-	h.Set("X-Apple-OAuth-Require-Grant-Code", "true")
 	h.Set("X-Apple-OAuth-Response-Mode", "web_message")
 	h.Set("X-Apple-OAuth-Response-Type", "code")
 	h.Set("X-Apple-OAuth-State", "auth-"+state.frameID)
@@ -228,31 +334,33 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return errors.New("Apple Account web session trust failed")
 	}
-	if state.grantCode == "" {
-		return errors.New("Apple Account OAuth grant code was unavailable")
-	}
-	c.lastStage = "oauth-validate"
-	grantCodes := []string{state.grantCode}
-	if decoded, decodeErr := base64.StdEncoding.DecodeString(state.grantCode); decodeErr == nil && len(decoded) > 0 && string(decoded) != state.grantCode {
-		grantCodes = append([]string{string(decoded)}, grantCodes...)
-	}
-	validated := false
-	for _, grantCode := range grantCodes {
-		validateQuery := url.Values{
-			"frame_id": {frame}, "iframeId": {frame}, "client_id": {state.clientID},
-			"redirect_uri": {"https://account.apple.com"}, "response_type": {"code"},
-			"response_mode": {"web_message"}, "state": {frame}, "code": {grantCode},
-			"authVersion": {"8.0.2"},
+	// The normal password/2FA portal flow establishes its session directly and
+	// returns no OAuth grant code. Only the native App SSO takeover branch emits
+	// a grant that must be bridged through /authorize/validate.
+	if state.grantCode != "" {
+		c.lastStage = "oauth-validate"
+		grantCodes := []string{state.grantCode}
+		if decoded, decodeErr := base64.StdEncoding.DecodeString(state.grantCode); decodeErr == nil && len(decoded) > 0 && string(decoded) != state.grantCode {
+			grantCodes = append([]string{string(decoded)}, grantCodes...)
 		}
-		response, validateData, validateErr := c.authRequest(ctx, state, http.MethodGet, authBase+"/authorize/validate?"+validateQuery.Encode(), nil, c.authHeaders(state))
-		if validateErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 && portalGrantValidationSucceeded(validateData) {
-			validated = true
-			break
+		validated := false
+		for _, grantCode := range grantCodes {
+			validateQuery := url.Values{
+				"frame_id": {frame}, "iframeId": {frame}, "client_id": {state.clientID},
+				"redirect_uri": {"https://account.apple.com"}, "response_type": {"code"},
+				"response_mode": {"web_message"}, "state": {frame}, "code": {grantCode},
+				"oauthRequireGrantCode": {"false"}, "authVersion": {"8.0.2"},
+			}
+			response, validateData, validateErr := c.authRequest(ctx, state, http.MethodGet, authBase+"/authorize/validate?"+validateQuery.Encode(), nil, c.authHeaders(state))
+			if validateErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 && portalGrantValidationSucceeded(validateData) {
+				validated = true
+				break
+			}
 		}
-	}
-	state.grantCode = ""
-	if !validated {
-		return errors.New("Apple Account OAuth grant validation failed")
+		state.grantCode = ""
+		if !validated {
+			return errors.New("Apple Account OAuth grant validation failed")
+		}
 	}
 	c.apiBase = strings.TrimRight(bootstrap.APIURL, "/")
 	c.lastStage = "portal-token"
@@ -273,6 +381,9 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 		return errors.New("Apple Account management API key was unavailable")
 	}
 	c.apiKey = manage.APIKey
+	if err := c.saveSession(); err != nil {
+		return errors.New("Apple Account management session could not be saved")
+	}
 	c.lastStage, c.lastHTTP = "", 0
 	return nil
 }
@@ -321,6 +432,14 @@ func (c *AppleAccountClient) portalRequest(ctx context.Context, method, path str
 	request.Header.Set("Origin", "https://account.apple.com")
 	request.Header.Set("Referer", "https://account.apple.com/")
 	request.Header.Set("User-Agent", hmeWebUserAgent)
+	request.Header.Set("X-Apple-I-Request-Context", "ca")
+	request.Header.Set("X-Apple-I-FD-Client-Info", hmeFDClientInfo())
+	if zone := time.Now().Location().String(); zone != "" && zone != "Local" {
+		request.Header.Set("X-Apple-I-TimeZone", zone)
+	}
+	if c.portalSCNT != "" {
+		request.Header.Set("scnt", c.portalSCNT)
+	}
 	if requireAPIKey {
 		if c.apiKey == "" {
 			return nil, 0, ErrAccountManagementAuthenticationRequired
@@ -332,6 +451,9 @@ func (c *AppleAccountClient) portalRequest(ctx context.Context, method, path str
 		return nil, 0, err
 	}
 	defer response.Body.Close()
+	if scnt := response.Header.Get("scnt"); scnt != "" {
+		c.portalSCNT = scnt
+	}
 	c.lastHTTP = response.StatusCode
 	data, readErr := io.ReadAll(io.LimitReader(response.Body, (4<<20)+1))
 	if readErr != nil || len(data) > 4<<20 {
@@ -343,12 +465,35 @@ func (c *AppleAccountClient) portalRequest(ctx context.Context, method, path str
 	return data, response.StatusCode, nil
 }
 
-func (c *AppleAccountClient) BeginReachableEmail(ctx context.Context, address string) error {
+func (c *AppleAccountClient) BeginReachableEmail(ctx context.Context, address, password string) error {
+	c.lastStage, c.lastHTTP = "reachable-send", 0
+	if err := c.ensurePortalSession(ctx); err != nil {
+		return err
+	}
 	address = strings.TrimSpace(address)
 	if address == "" || !strings.Contains(address, "@") || len(address) > 254 {
 		return errors.New("invalid reachable email address")
 	}
-	data, _, err := c.portalRequest(ctx, http.MethodPost, "/account/manage/email/alternate/add/verification", map[string]string{"address": address}, true)
+	payload := map[string]string{"address": address}
+	data, status, err := c.portalRequest(ctx, http.MethodPost, "/account/manage/email/alternate/add/verification", payload, true)
+	if err != nil && status == http.StatusUnavailableForLegalReasons {
+		// Apple Account protects critical profile edits with a second password
+		// challenge even when the reusable management session is valid. Complete
+		// that challenge in the same cookie jar, then replay the original mutation
+		// exactly once, matching the account.apple.com frontend interceptor.
+		c.lastStage = "reachable-password-challenge"
+		if password == "" {
+			return ErrAccountManagementAuthenticationRequired
+		}
+		if _, _, challengeErr := c.portalRequest(ctx, http.MethodPost, "/authenticate/password", map[string]string{"password": password}, true); challengeErr != nil {
+			return challengeErr
+		}
+		if saveErr := c.saveSession(); saveErr != nil {
+			return errors.New("Apple Account management session could not be saved")
+		}
+		c.lastStage = "reachable-send-retry"
+		data, _, err = c.portalRequest(ctx, http.MethodPost, "/account/manage/email/alternate/add/verification", payload, true)
+	}
 	if err != nil {
 		return err
 	}
@@ -363,6 +508,7 @@ func (c *AppleAccountClient) BeginReachableEmail(ctx context.Context, address st
 		return errors.New("Apple Account returned a different email challenge")
 	}
 	c.pendingEmail, c.pendingVerify = address, append(json.RawMessage(nil), challenge.VerificationID...)
+	c.lastStage, c.lastHTTP = "", 0
 	return nil
 }
 
@@ -390,7 +536,7 @@ func (c *AppleAccountClient) VerifyReachableEmail(ctx context.Context, code stri
 }
 
 func (c *AppleAccountClient) HasReachableEmail(ctx context.Context, address string) bool {
-	data, _, err := c.portalRequest(ctx, http.MethodGet, "/account/manage", nil, false)
+	data, _, err := c.portalRequest(ctx, http.MethodGet, "/account/manage", nil, true)
 	if err != nil {
 		return false
 	}

@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -24,6 +27,32 @@ func TestAccountAuthCapturesOAuthGrantCode(t *testing.T) {
 	response, _, err := client.authRequest(context.Background(), state, http.MethodGet, server.URL, nil, make(http.Header))
 	if err != nil || response.StatusCode != http.StatusOK || state.grantCode != "test-grant" {
 		t.Fatal("OAuth grant code was not captured for portal validation")
+	}
+}
+
+func TestAppleAccountManagementSessionPersistsWithoutPassword(t *testing.T) {
+	dir := t.TempDir()
+	client, err := NewAppleAccountClientWithStore(dir, "owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.apiBase, client.apiKey = "https://appleid.apple.com", "test-api-key"
+	client.portalSCNT = "test-scnt"
+	u, _ := url.Parse("https://appleid.apple.com")
+	client.jar.SetCookies(u, []*http.Cookie{{Name: "test-session", Value: "session-value", Path: "/", Secure: true}})
+	if err := client.saveSession(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "account-management-session.json")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := NewAppleAccountClientWithStore(dir, "owner@example.test")
+	if err != nil || restored.apiKey != "test-api-key" || restored.portalSCNT != "test-scnt" {
+		t.Fatalf("management session was not restored: %v", err)
+	}
+	if cookies := restored.jar.Cookies(u); len(cookies) != 1 || cookies[0].Name != "test-session" {
+		t.Fatal("management cookies were not restored")
 	}
 }
 
@@ -99,7 +128,7 @@ func TestReachableEmailChallengeBindsAddressAndVerifiesReadback(t *testing.T) {
 		t.Fatal(err)
 	}
 	client.apiBase, client.apiKey, client.http = server.URL, "test-api-key", server.Client()
-	if err := client.BeginReachableEmail(context.Background(), address); err != nil {
+	if err := client.BeginReachableEmail(context.Background(), address, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.VerifyReachableEmail(context.Background(), "123456"); err != nil {
@@ -107,5 +136,145 @@ func TestReachableEmailChallengeBindsAddressAndVerifiesReadback(t *testing.T) {
 	}
 	if !verified || !client.HasReachableEmail(context.Background(), address) {
 		t.Fatal("verified reachable email was not read back")
+	}
+}
+
+func TestReachableEmailCompletesPasswordChallengeAndReplaysOnce(t *testing.T) {
+	const (
+		address  = "forward@example.test"
+		password = "test-password"
+	)
+	sendAttempts, passwordAttempts := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Apple-Api-Key") != "test-api-key" {
+			http.Error(w, "missing api key", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/account/manage":
+			_ = json.NewEncoder(w).Encode(map[string]any{"account": map[string]any{}})
+		case "/authenticate/password":
+			passwordAttempts++
+			var request map[string]string
+			if json.NewDecoder(r.Body).Decode(&request) != nil || request["password"] != password {
+				t.Fatal("password challenge did not preserve the current password")
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case "/account/manage/email/alternate/add/verification":
+			sendAttempts++
+			if sendAttempts == 1 {
+				http.Error(w, "TwoStepAuthenticationRequired", http.StatusUnavailableForLegalReasons)
+				return
+			}
+			if sendAttempts > 2 {
+				t.Fatal("reachable email mutation was replayed more than once")
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"address": address, "verificationId": 84})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := NewAppleAccountClient("owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.apiBase, client.apiKey, client.http = server.URL, "test-api-key", server.Client()
+	if err := client.BeginReachableEmail(context.Background(), address, password); err != nil {
+		t.Fatal(err)
+	}
+	if sendAttempts != 2 || passwordAttempts != 1 {
+		t.Fatalf("unexpected challenge sequence: send=%d password=%d", sendAttempts, passwordAttempts)
+	}
+}
+
+func TestReachableEmailPasswordChallengeDoesNotReplayWhenRejected(t *testing.T) {
+	sendAttempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/account/manage":
+			_ = json.NewEncoder(w).Encode(map[string]any{"account": map[string]any{}})
+		case "/authenticate/password":
+			http.Error(w, "rejected", http.StatusUnauthorized)
+		case "/account/manage/email/alternate/add/verification":
+			sendAttempts++
+			http.Error(w, "TwoStepAuthenticationRequired", http.StatusUnavailableForLegalReasons)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := NewAppleAccountClient("owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.apiBase, client.apiKey, client.http = server.URL, "test-api-key", server.Client()
+	if err := client.BeginReachableEmail(context.Background(), "forward@example.test", "test-password"); err == nil {
+		t.Fatal("rejected password challenge was accepted")
+	}
+	stage, status := client.AuthenticationFailure()
+	if sendAttempts != 1 || stage != "reachable-password-challenge" || status != http.StatusUnauthorized {
+		t.Fatalf("unexpected rejection state: send=%d stage=%q status=%d", sendAttempts, stage, status)
+	}
+}
+
+func TestPortalRequestReplaysOfficialManagementContext(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Header.Get("X-Apple-I-Request-Context") != "ca" || r.Header.Get("X-Apple-I-FD-Client-Info") == "" {
+			t.Fatal("official Apple Account management context headers were missing")
+		}
+		if requests == 1 {
+			if r.Header.Get("scnt") != "" {
+				t.Fatal("unexpected scnt on the first request")
+			}
+			w.Header().Set("scnt", "issued-scnt")
+		} else if r.Header.Get("scnt") != "issued-scnt" {
+			t.Fatal("Apple Account scnt was not replayed")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"account": map[string]any{}})
+	}))
+	defer server.Close()
+	client, err := NewAppleAccountClient("owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.apiBase, client.apiKey, client.http = server.URL, "test-api-key", server.Client()
+	if _, _, err := client.portalRequest(context.Background(), http.MethodGet, "/account/manage", nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.portalRequest(context.Background(), http.MethodGet, "/account/manage", nil, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReachableEmailDoesNotTreatForbiddenAsPasswordChallenge(t *testing.T) {
+	passwordAttempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/account/manage":
+			_ = json.NewEncoder(w).Encode(map[string]any{"account": map[string]any{}})
+		case "/authenticate/password":
+			passwordAttempts++
+			w.WriteHeader(http.StatusNoContent)
+		case "/account/manage/email/alternate/add/verification":
+			http.Error(w, "forbidden", http.StatusForbidden)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := NewAppleAccountClient("owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.apiBase, client.apiKey, client.http = server.URL, "test-api-key", server.Client()
+	if err := client.BeginReachableEmail(context.Background(), "forward@example.test", "test-password"); err == nil {
+		t.Fatal("forbidden reachable email request was accepted")
+	}
+	if passwordAttempts != 0 {
+		t.Fatal("forbidden response incorrectly triggered a password challenge")
 	}
 }

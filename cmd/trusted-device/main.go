@@ -663,22 +663,26 @@ func run() (runErr error) {
 				if alias == "" || !strings.Contains(alias, "@") {
 					return control.Result{Message: "请输入要添加并验证的转发邮箱", Stage: "hme-reachable-validation"}
 				}
-				if password == "" {
-					return control.Result{Message: "账户资料变更需要一次带密码重连；请重新连接当前子号后再发送邮箱验证码", Stage: "reconnect-required"}
-				}
 				var clientErr error
-				accountManagementClient, clientErr = icloud.NewAppleAccountClient(appleID)
+				accountManagementClient, clientErr = icloud.NewAppleAccountClientWithStore(*dir, appleID)
 				if clientErr != nil {
 					return control.Result{Message: "无法初始化 Apple 账户管理会话", Stage: "hme-reachable-session"}
 				}
-				if clientErr = accountManagementClient.Authenticate(queryCtx, password, generateCode); clientErr != nil {
+				if clientErr = accountManagementClient.Resume(queryCtx); clientErr != nil {
+					if password == "" {
+						accountManagementClient = nil
+						return control.Result{Message: "没有可复用的 Apple 账户管理会话；请带密码重新连接当前子号一次", Stage: "reconnect-required"}
+					}
+					if clientErr = accountManagementClient.Authenticate(queryCtx, password, generateCode); clientErr != nil {
+						failureStage, failureHTTP := accountManagementClient.AuthenticationFailure()
+						accountManagementClient = nil
+						return control.Result{Message: "Apple 账户管理认证未完成；密码未保存", Stage: "hme-reachable-auth-" + failureStage, HTTPStatus: failureHTTP}
+					}
+				}
+				if clientErr = accountManagementClient.BeginReachableEmail(queryCtx, alias, password); clientErr != nil {
 					failureStage, failureHTTP := accountManagementClient.AuthenticationFailure()
 					accountManagementClient = nil
-					return control.Result{Message: "Apple 账户管理认证未完成；登录会话和密码未保存", Stage: "hme-reachable-auth-" + failureStage, HTTPStatus: failureHTTP}
-				}
-				if clientErr = accountManagementClient.BeginReachableEmail(queryCtx, alias); clientErr != nil {
-					accountManagementClient = nil
-					return control.Result{Message: "Apple 未发送目标邮箱验证码；未修改账户资料", Stage: "hme-reachable-send"}
+					return control.Result{Message: "Apple 未发送目标邮箱验证码；未修改账户资料", Stage: "hme-reachable-" + failureStage, HTTPStatus: failureHTTP}
 				}
 				pendingReachableEmail = alias
 				return control.Result{OK: true, Message: "Apple 已向目标邮箱发送验证码；请输入邮件中的验证码完成添加并切换转发", Stage: "hme-reachable-code", HideMyEmail: info}
