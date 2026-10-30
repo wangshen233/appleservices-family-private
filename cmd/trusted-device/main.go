@@ -294,6 +294,17 @@ func run() (runErr error) {
 		login, err = appleservices.ResumeLogin(appleID, store, accepted, options...)
 	} else {
 		login, err = appleservices.BeginLogin(appleservices.Credentials{AppleID: appleID, Password: password}, store, options...)
+		if shouldResumeActivatedSession(err) {
+			// GSA can reject a fresh login handle as inactive even while this
+			// exact account still owns a valid, Apple-accepted iCloud checkpoint.
+			// Resume only after ResumeLogin revalidates every local binding; never
+			// discard an activated worker merely because the new login path failed.
+			if accepted, loadErr := store.LoadAcceptedICloud(); loadErr == nil {
+				if restored, resumeErr := appleservices.ResumeLogin(appleID, store, accepted, options...); resumeErr == nil {
+					login, err = restored, nil
+				}
+			}
+		}
 	}
 	if ctx.Err() != nil {
 		return nil
@@ -425,10 +436,12 @@ func run() (runErr error) {
 	}
 	fmt.Println("Apple accepted the registration request. Waiting for real AuthKit delivery; trusted-device reception is not yet verified.")
 	devices, err := active.AccountDevices()
+	deviceFailureStage := ""
 	if ctx.Err() != nil {
 		return nil
 	}
 	if err != nil {
+		deviceFailureStage = deviceListFailure(err).Stage
 		fmt.Fprintln(os.Stderr, "Could not verify account device status:", err)
 	} else {
 		status.setDevices(devices, *name)
@@ -449,7 +462,7 @@ func run() (runErr error) {
 	}
 	status.Authenticated, status.State = true, "online"
 	if err != nil {
-		status.State = "device_query_failed"
+		status.State = deviceFailureStage
 	}
 	status.LastRefreshAt = time.Now().UTC()
 	if panel != nil {
@@ -1161,7 +1174,10 @@ func run() (runErr error) {
 		if action == "devices" {
 			devices, err := active.AccountDevices()
 			if err != nil {
-				return deviceListFailure(err)
+				result := deviceListFailure(err)
+				status.State, status.Authenticated = result.Stage, true
+				_ = status.save(*dir)
+				return result
 			}
 			status.setDevices(devices, *name)
 			if panel != nil {
