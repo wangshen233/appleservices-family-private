@@ -1021,7 +1021,7 @@ func run() (runErr error) {
 			if err := active.BeginAccountValidation(); err != nil {
 				status.State, status.VerificationRequired = "refresh_failed", true
 				_ = status.save(*dir)
-				return control.Result{Message: "账户验证启动失败，请稍后重试"}
+				return control.Result{Stage: "reconnect-required", Message: "当前是免密恢复会话；设备管理身份需要一次带密码重连，请重新连接此账号"}
 			}
 			if active.NeedsTwoFactor() {
 				status.State, status.Authenticated, status.VerificationRequired = "awaiting_account_validation", false, true

@@ -131,6 +131,11 @@ async function action(name,extra={},options={}){
 		openLogin('reconnect');
 		return;
 	  }
+	  if(name==='validate-account'&&result.stage==='reconnect-required'){
+		notice(result.message||'请重新连接当前账号',true);
+		openLogin('reconnect');
+		return;
+	  }
       if(name==='storage-authenticate'){
         $('storeAuthSummary').textContent=(result.message||'购买会话验证未完成')+detail;
         $('storeAuthForm').hidden=result.stage!=='purchase-store-2fa';

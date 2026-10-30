@@ -860,7 +860,15 @@ func (s *Server) startInMode(ctx context.Context, dir string, creds credentials,
 	s.setMessage(account, "")
 	current := s.readStatusFrom(dir)
 	if current.Running {
-		if _, err := s.recordFor(dir); err == nil {
+		// A password supplied for an already-running account is an explicit
+		// reconnect request. Do not silently report the old passwordless worker
+		// as connected; stop it and start a fresh authenticated session below.
+		if creds.Password == "" {
+			if _, err := s.recordFor(dir); err == nil {
+				return control.Result{OK: true, Message: "已连接到现有后台"}
+			}
+		}
+		if creds.Password == "" {
 			return control.Result{OK: true, Message: "已连接到现有后台"}
 		}
 	}
