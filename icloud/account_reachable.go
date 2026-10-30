@@ -32,6 +32,7 @@ type AppleAccountClient struct {
 	sessionPath   string
 	http          *http.Client
 	jar           http.CookieJar
+	authBase      string
 	apiBase       string
 	apiKey        string
 	portalSCNT    string
@@ -194,8 +195,12 @@ func (c *AppleAccountClient) authHeaders(state *hmeAuthState) http.Header {
 	h.Set("X-Requested-With", "XMLHttpRequest")
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "application/json")
-	h.Set("Origin", "https://account.apple.com")
-	h.Set("Referer", "https://account.apple.com/")
+	authOrigin := strings.TrimRight(c.authBase, "/")
+	if authOrigin == "" {
+		authOrigin = "https://idmsa.apple.com/appleauth/auth"
+	}
+	h.Set("Origin", authOrigin)
+	h.Set("Referer", authOrigin+"/")
 	h.Set("User-Agent", hmeWebUserAgent)
 	return h
 }
@@ -249,6 +254,7 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 		return errors.New("Apple Account bootstrap was invalid")
 	}
 	authBase := strings.TrimRight(bootstrap.ServiceURL, "/") + "/auth"
+	c.authBase = authBase
 	state := &hmeAuthState{frameID: randomHex(16), clientID: bootstrap.ServiceKey}
 	frame := "auth-" + state.frameID
 	query := url.Values{"frame_id": {frame}, "language": {"en_US"}, "skVersion": {"7"}, "iframeId": {frame}, "client_id": {state.clientID}, "redirect_uri": {"https://account.apple.com"}, "response_type": {"code"}, "response_mode": {"web_message"}, "state": {frame}, "authVersion": {"latest"}}

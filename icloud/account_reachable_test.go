@@ -47,6 +47,9 @@ func TestAccountAuthHeadersMatchCurrentFirstPartyWidget(t *testing.T) {
 	if headers.Get("X-Apple-Privacy-Consent-Accepted") != "true" {
 		t.Fatal("sign-in v2 privacy consent header was missing")
 	}
+	if headers.Get("Origin") != "https://idmsa.apple.com/appleauth/auth" || headers.Get("Referer") != "https://idmsa.apple.com/appleauth/auth/" {
+		t.Fatal("identity authentication origin was not bound to the Apple auth iframe")
+	}
 	if headers.Get("X-Apple-OAuth-Client-Type") != "firstPartyAuth" || headers.Get("X-Apple-Domain-Id") != "6" || headers.Get("X-Apple-Offer-Security-Upgrade") != "1" {
 		t.Fatal("Apple compatibility authentication headers were incomplete")
 	}
