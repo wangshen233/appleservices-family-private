@@ -47,26 +47,11 @@ func TestAccountAuthHeadersMatchCurrentFirstPartyWidget(t *testing.T) {
 	if headers.Get("X-Apple-Privacy-Consent-Accepted") != "true" {
 		t.Fatal("sign-in v2 privacy consent header was missing")
 	}
-	if headers.Get("X-Apple-OAuth-Require-Grant-Code") != "true" {
-		t.Fatal("pure-protocol portal flow did not request a bridge grant")
-	}
 	if headers.Get("Origin") != "https://idmsa.apple.com/appleauth/auth" || headers.Get("Referer") != "https://idmsa.apple.com/appleauth/auth/" {
 		t.Fatal("identity authentication origin was not bound to the Apple auth iframe")
 	}
 	if headers.Get("X-Apple-OAuth-Client-Type") != "firstPartyAuth" || headers.Get("X-Apple-Domain-Id") != "6" || headers.Get("X-Apple-Offer-Security-Upgrade") != "1" {
 		t.Fatal("Apple compatibility authentication headers were incomplete")
-	}
-}
-
-func TestPortalGrantValidationUsesNavigationHeaders(t *testing.T) {
-	headers := portalGrantNavigationHeaders()
-	if headers.Get("Accept") == "" || headers.Get("User-Agent") == "" {
-		t.Fatal("portal grant navigation headers were incomplete")
-	}
-	for _, forbidden := range []string{"X-Apple-Session-Token", "X-Apple-Auth-Attributes", "X-Apple-ID-Session-Id", "X-Apple-OAuth-Client-Id"} {
-		if headers.Get(forbidden) != "" {
-			t.Fatalf("authentication API header leaked into grant navigation: %s", forbidden)
-		}
 	}
 }
 

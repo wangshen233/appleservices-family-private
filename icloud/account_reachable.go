@@ -205,7 +205,6 @@ func (c *AppleAccountClient) authHeaders(state *hmeAuthState) http.Header {
 	h.Set("X-Apple-OAuth-Client-Id", state.clientID)
 	h.Set("X-Apple-OAuth-Client-Type", "firstPartyAuth")
 	h.Set("X-Apple-OAuth-Redirect-URI", "https://account.apple.com")
-	h.Set("X-Apple-OAuth-Require-Grant-Code", "true")
 	h.Set("X-Apple-OAuth-Response-Mode", "web_message")
 	h.Set("X-Apple-OAuth-Response-Type", "code")
 	h.Set("X-Apple-OAuth-State", frameID)
@@ -227,13 +226,6 @@ func (c *AppleAccountClient) authHeaders(state *hmeAuthState) http.Header {
 	}
 	h.Set("Origin", authOrigin)
 	h.Set("Referer", authOrigin+"/")
-	h.Set("User-Agent", hmeWebUserAgent)
-	return h
-}
-
-func portalGrantNavigationHeaders() http.Header {
-	h := make(http.Header)
-	h.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	h.Set("User-Agent", hmeWebUserAgent)
 	return h
 }
@@ -382,39 +374,11 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 	} else if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return errors.New("Apple Account credentials were rejected")
 	}
-	c.lastStage = "trust-session"
-	response, _, err = c.authRequest(ctx, state, http.MethodGet, authBase+"/2sv/trust", nil, c.authHeaders(state))
-	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
-		return errors.New("Apple Account web session trust failed")
-	}
-	// The normal password/2FA portal flow establishes its session directly and
-	// returns no OAuth grant code. Only the native App SSO takeover branch emits
-	// a grant that must be bridged through /authorize/validate.
-	if state.grantCode != "" {
-		c.lastStage = "oauth-validate"
-		grantCodes := []string{state.grantCode}
-		if decoded, decodeErr := base64.StdEncoding.DecodeString(state.grantCode); decodeErr == nil && len(decoded) > 0 && string(decoded) != state.grantCode {
-			grantCodes = append([]string{string(decoded)}, grantCodes...)
-		}
-		validated := false
-		for _, grantCode := range grantCodes {
-			validateQuery := url.Values{
-				"frame_id": {frame}, "iframeId": {frame}, "client_id": {state.clientID},
-				"redirect_uri": {"https://account.apple.com"}, "response_type": {"code"},
-				"response_mode": {"web_message"}, "state": {frame}, "code": {grantCode},
-				"oauthRequireGrantCode": {"true"}, "authVersion": {"8.0.2"},
-			}
-			response, validateData, validateErr := c.authRequest(ctx, state, http.MethodGet, authBase+"/authorize/validate?"+validateQuery.Encode(), nil, portalGrantNavigationHeaders())
-			if validateErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 && portalGrantValidationSucceeded(validateData) {
-				validated = true
-				break
-			}
-		}
-		state.grantCode = ""
-		if !validated {
-			return errors.New("Apple Account OAuth grant validation failed")
-		}
-	}
+	// Unlike iCloud Web login, Apple Account management does not call
+	// /2sv/trust after a successful trusted-device code. The current portal
+	// proceeds directly to /account/manage/gs/ws/token in the same auth
+	// context. Adding the iCloud trust/grant bridge here invalidates that
+	// context and produces a misleading final HTTP 401.
 	c.apiBase = strings.TrimRight(bootstrap.APIURL, "/")
 	c.lastStage = "portal-token"
 	_, tokenStatus, tokenErr := c.portalRequest(ctx, http.MethodGet, "/account/manage/gs/ws/token", nil, false)
