@@ -47,6 +47,11 @@ func TestAccountAuthHeadersMatchCurrentFirstPartyWidget(t *testing.T) {
 	if headers.Get("X-Apple-Privacy-Consent-Accepted") != "true" {
 		t.Fatal("sign-in v2 privacy consent header was missing")
 	}
+	for _, obsolete := range []string{"X-Apple-OAuth-Client-Type", "X-Apple-Domain-Id", "X-Apple-Offer-Security-Upgrade", "X-Requested-With"} {
+		if headers.Get(obsolete) != "" {
+			t.Fatalf("obsolete Apple authentication header was retained: %s", obsolete)
+		}
+	}
 }
 
 func TestAppleAccountManagementSessionPersistsWithoutPassword(t *testing.T) {
