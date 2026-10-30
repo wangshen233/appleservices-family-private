@@ -58,6 +58,18 @@ func TestAccountAuthHeadersMatchCurrentFirstPartyWidget(t *testing.T) {
 	}
 }
 
+func TestPortalGrantValidationUsesNavigationHeaders(t *testing.T) {
+	headers := portalGrantNavigationHeaders()
+	if headers.Get("Accept") == "" || headers.Get("User-Agent") == "" {
+		t.Fatal("portal grant navigation headers were incomplete")
+	}
+	for _, forbidden := range []string{"X-Apple-Session-Token", "X-Apple-Auth-Attributes", "X-Apple-ID-Session-Id", "X-Apple-OAuth-Client-Id"} {
+		if headers.Get(forbidden) != "" {
+			t.Fatalf("authentication API header leaked into grant navigation: %s", forbidden)
+		}
+	}
+}
+
 func TestAppleAccountManagementSessionPersistsWithoutPassword(t *testing.T) {
 	dir := t.TempDir()
 	client, err := NewAppleAccountClientWithStore(dir, "owner@example.test")

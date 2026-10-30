@@ -206,6 +206,13 @@ func (c *AppleAccountClient) authHeaders(state *hmeAuthState) http.Header {
 	return h
 }
 
+func portalGrantNavigationHeaders() http.Header {
+	h := make(http.Header)
+	h.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	h.Set("User-Agent", hmeWebUserAgent)
+	return h
+}
+
 func (c *AppleAccountClient) authRequest(ctx context.Context, state *hmeAuthState, method, endpoint string, body []byte, headers http.Header) (*http.Response, []byte, error) {
 	request, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -372,7 +379,7 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 				"response_mode": {"web_message"}, "state": {frame}, "code": {grantCode},
 				"oauthRequireGrantCode": {"true"}, "authVersion": {"8.0.2"},
 			}
-			response, validateData, validateErr := c.authRequest(ctx, state, http.MethodGet, authBase+"/authorize/validate?"+validateQuery.Encode(), nil, c.authHeaders(state))
+			response, validateData, validateErr := c.authRequest(ctx, state, http.MethodGet, authBase+"/authorize/validate?"+validateQuery.Encode(), nil, portalGrantNavigationHeaders())
 			if validateErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 && portalGrantValidationSucceeded(validateData) {
 				validated = true
 				break
