@@ -96,6 +96,30 @@ func TestAppleAccountManagementSessionPersistsWithoutPassword(t *testing.T) {
 	}
 }
 
+func TestAppleAccountClientSeedsOnlyBoundICloudWebCookies(t *testing.T) {
+	dir := t.TempDir()
+	saved := hmeSession{AppleID: "owner@example.test", Cookies: []hmeCookie{{Scope: "https://idmsa.apple.com", Name: "seed-session", Value: "seed-value", Path: "/", Secure: true}}}
+	data, _ := json.Marshal(saved)
+	if err := os.WriteFile(filepath.Join(dir, "hme-session.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewAppleAccountClientWithStore(dir, "owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse("https://idmsa.apple.com")
+	if cookies := client.jar.Cookies(u); len(cookies) != 1 || cookies[0].Name != "seed-session" {
+		t.Fatal("bound iCloud Web cookie was not seeded into account authentication")
+	}
+	other, err := NewAppleAccountClientWithStore(dir, "other@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cookies := other.jar.Cookies(u); len(cookies) != 0 {
+		t.Fatal("iCloud Web cookie crossed Apple Account bindings")
+	}
+}
+
 func TestPortalGrantValidationRequiresBusinessSuccess(t *testing.T) {
 	if portalGrantValidationSucceeded([]byte(`<script id="grant_code_args">{"message":{"event":"WidgetBridgeFailed"}}</script>`)) {
 		t.Fatal("OAuth business failure was accepted")

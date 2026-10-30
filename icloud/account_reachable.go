@@ -80,8 +80,33 @@ func newAppleAccountClient(accountDir, appleID string) (*AppleAccountClient, err
 		sessionPath = filepath.Join(accountDir, "account-management-session.json")
 	}
 	c := &AppleAccountClient{appleID: appleID, sessionPath: sessionPath, jar: jar, http: &http.Client{Jar: jar, Transport: transport, Timeout: 35 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	if strings.TrimSpace(accountDir) != "" {
+		_ = c.loadHMESeed(filepath.Join(accountDir, "hme-session.json"))
+	}
 	_ = c.loadSavedSession()
 	return c, nil
+}
+
+func (c *AppleAccountClient) loadHMESeed(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if len(data) > 2<<20 {
+		return errors.New("saved iCloud Web session is too large")
+	}
+	var saved hmeSession
+	if json.Unmarshal(data, &saved) != nil || !strings.EqualFold(strings.TrimSpace(saved.AppleID), c.appleID) {
+		return errors.New("saved iCloud Web session binding is invalid")
+	}
+	for _, item := range saved.Cookies {
+		u, parseErr := url.Parse(item.Scope)
+		if parseErr != nil || u.Scheme != "https" || u.Hostname() == "" || item.Name == "" || item.Value == "" {
+			continue
+		}
+		c.jar.SetCookies(u, []*http.Cookie{{Name: item.Name, Value: item.Value, Path: item.Path, Secure: item.Secure, Expires: item.Expires}})
+	}
+	return nil
 }
 
 func (c *AppleAccountClient) loadSavedSession() error {
