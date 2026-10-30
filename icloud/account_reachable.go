@@ -310,20 +310,37 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 		if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 			return errors.New("Apple Account trusted-device challenge failed")
 		}
-		codeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		code, codeErr := codeProvider(codeCtx)
-		cancel()
-		if codeErr != nil || len(strings.TrimSpace(code)) != 6 {
-			return errors.New("local trusted-device code generation failed")
+		previousCode := ""
+		verified := false
+		for attempt := 0; attempt < 2; attempt++ {
+			codeTimeout := 60 * time.Second
+			if attempt > 0 {
+				codeTimeout = 35 * time.Second
+			}
+			codeCtx, cancel := context.WithTimeout(ctx, codeTimeout)
+			code, codeErr := nextDistinctTrustedCode(codeCtx, codeProvider, previousCode, time.Second)
+			cancel()
+			if codeErr != nil {
+				previousCode = ""
+				return errors.New("local trusted-device code generation failed")
+			}
+			verifyBody, _ := json.Marshal(map[string]any{"securityCode": map[string]string{"code": code}})
+			c.lastStage = "trusted-code"
+			response, verifyData, err := c.authRequest(ctx, state, http.MethodPost, authBase+"/verify/trusteddevice/securitycode", verifyBody, c.authHeaders(state))
+			for index := range verifyBody {
+				verifyBody[index] = 0
+			}
+			previousCode, code = code, ""
+			if err == nil && ((response.StatusCode >= 200 && response.StatusCode < 300) || (response.StatusCode == http.StatusConflict && state.sessionToken != "" && bytes.Contains(verifyData, []byte(`"valid":true`)))) {
+				verified = true
+				break
+			}
+			if response == nil || response.StatusCode != http.StatusBadRequest {
+				break
+			}
 		}
-		verifyBody, _ := json.Marshal(map[string]any{"securityCode": map[string]string{"code": strings.TrimSpace(code)}})
-		c.lastStage = "trusted-code"
-		response, verifyData, err := c.authRequest(ctx, state, http.MethodPost, authBase+"/verify/trusteddevice/securitycode", verifyBody, c.authHeaders(state))
-		for index := range verifyBody {
-			verifyBody[index] = 0
-		}
-		code = ""
-		if err != nil || !((response.StatusCode >= 200 && response.StatusCode < 300) || (response.StatusCode == http.StatusConflict && state.sessionToken != "" && bytes.Contains(verifyData, []byte(`"valid":true`)))) {
+		previousCode = ""
+		if !verified {
 			return errors.New("Apple Account rejected the trusted-device verification code")
 		}
 	} else if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -386,6 +403,35 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 	}
 	c.lastStage, c.lastHTTP = "", 0
 	return nil
+}
+
+func nextDistinctTrustedCode(ctx context.Context, provider func(context.Context) (string, error), previous string, pollEvery time.Duration) (string, error) {
+	if provider == nil {
+		return "", ErrAccountManagementAuthenticationRequired
+	}
+	if pollEvery <= 0 {
+		pollEvery = time.Second
+	}
+	for {
+		code, err := provider(ctx)
+		code = strings.TrimSpace(code)
+		if err != nil {
+			return "", err
+		}
+		if len(code) != 6 {
+			return "", errors.New("local trusted-device code was invalid")
+		}
+		if code != previous {
+			return code, nil
+		}
+		timer := time.NewTimer(pollEvery)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (c *AppleAccountClient) AuthenticationFailure() (string, int) {

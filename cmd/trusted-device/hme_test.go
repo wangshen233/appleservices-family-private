@@ -22,6 +22,13 @@ func TestReachableVerificationReconcilesAppliedAppleMutation(t *testing.T) {
 	}
 }
 
+func TestExistingReachableTargetIsDetectedCaseInsensitively(t *testing.T) {
+	info := &icloud.HideMyEmailInfo{ForwardToEmails: []string{"primary@example.test", "verified@example.test"}, SelectedForward: "verified@example.test"}
+	if !hmeForwardTargetAvailable(info, "VERIFIED@example.test") {
+		t.Fatal("existing verified forwarding target was not detected")
+	}
+}
+
 func TestRequireHMEFamilyMemberRejectsOrganizerAndStaleCache(t *testing.T) {
 	now := time.Now().UTC()
 	write := func(dir string, checkedAt time.Time, family control.FamilyInfo) {

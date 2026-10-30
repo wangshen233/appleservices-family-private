@@ -663,6 +663,19 @@ func run() (runErr error) {
 				if alias == "" || !strings.Contains(alias, "@") {
 					return control.Result{Message: "请输入要添加并验证的转发邮箱", Stage: "hme-reachable-validation"}
 				}
+				if hmeForwardTargetAvailable(info, alias) {
+					if !strings.EqualFold(strings.TrimSpace(info.SelectedForward), alias) {
+						if forwardErr := hmeClient.UpdateForwardTo(queryCtx, alias); forwardErr != nil {
+							return control.Result{Message: "该联系邮箱已验证，但转发目标更新未完成", Stage: "hme-reachable-existing-forward"}
+						}
+						readback, readbackErr := hmeClient.List(queryCtx)
+						if readbackErr != nil || readback == nil || !strings.EqualFold(strings.TrimSpace(readback.SelectedForward), alias) {
+							return control.Result{Message: "该联系邮箱已验证，Apple 已接收转发更新，但实时回读尚未确认；请勿重复提交", Stage: "hme-reachable-existing-readback"}
+						}
+						info = readback
+					}
+					return control.Result{OK: true, Message: "该联系邮箱已经验证并设为默认转发目标，无需重新登录或发送验证码", Stage: "hme-reachable-existing", HideMyEmail: info}
+				}
 				var clientErr error
 				accountManagementClient, clientErr = icloud.NewAppleAccountClientWithStore(*dir, appleID)
 				if clientErr != nil {

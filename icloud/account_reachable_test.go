@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestAccountAuthCapturesOAuthGrantCode(t *testing.T) {
@@ -276,5 +277,22 @@ func TestReachableEmailDoesNotTreatForbiddenAsPasswordChallenge(t *testing.T) {
 	}
 	if passwordAttempts != 0 {
 		t.Fatal("forbidden response incorrectly triggered a password challenge")
+	}
+}
+
+func TestNextDistinctTrustedCodeWaitsForCodeRotation(t *testing.T) {
+	calls := 0
+	provider := func(context.Context) (string, error) {
+		calls++
+		if calls < 3 {
+			return "123456", nil
+		}
+		return "654321", nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	code, err := nextDistinctTrustedCode(ctx, provider, "123456", time.Millisecond)
+	if err != nil || code != "654321" || calls != 3 {
+		t.Fatalf("trusted code rotation was not observed: code=%q calls=%d err=%v", code, calls, err)
 	}
 }
