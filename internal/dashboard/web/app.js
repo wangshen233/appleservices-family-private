@@ -150,7 +150,7 @@ async function action(name,extra={},options={}){
         $('storeAuthForm').hidden=result.stage!=='purchase-store-2fa';
       }
       if(name==='storage-purchase')$('planSummary').textContent=(result.message||'购买请求未完成')+detail;
-      throw new Error(result.message||'操作未完成');
+      throw new Error((result.message||'操作未完成')+detail);
     }
     if(result.activation){activationInfo=result.activation;activationAccount=selectedAccount;if(current&&result.activation.completed){current.icloud_activated=true;current.activation_ready=false;}renderActivation(current);}
     if(result.store_authentication?.ready){$('storeAuthSummary').textContent='购买会话认证通过 · 当前后台会话可用 · 临时会话不会持久化';$('storeAuthForm').hidden=true;}
