@@ -966,8 +966,6 @@ func lastProcessError(path string) string {
 			return "Apple 已保存会话失效，请输入当前账号密码重新连接"
 		case strings.Contains(line, "ec=-22406") && strings.Contains(line, "correct password"):
 			return "Apple 拒绝了当前密码，请确认使用的是这个账号的最新密码，并关闭密码管理器的旧自动填充"
-		case strings.Contains(line, "ec=-20755"):
-			return "Apple 拒绝了本次新登录初始化；这不否定已有 iCloud 激活状态。设备身份和已保存激活会话仍保留，请勿反复重连"
 		case strings.Contains(line, "ec=-22981") && strings.Contains(line, "tooManyCodesSent=true"):
 			if strings.Contains(line, "noTrustedDevices=true") {
 				return "Apple 已限制该账号继续发送短信验证码，且没有可用受信任设备；请停止重试，等待 Apple 解除限制后再连接"

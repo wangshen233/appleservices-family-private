@@ -180,21 +180,6 @@ func TestLastProcessErrorMapsRejectedPasswordWithoutExposingLog(t *testing.T) {
 	}
 }
 
-func TestLastProcessErrorPreservesActivatedMeaningForInactiveInit(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "worker.err")
-	line := "trusted-device: gsa: init rejected (ec=-20755) - server said: This Apple Account is not active."
-	if err := os.WriteFile(path, []byte(line+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	got := lastProcessError(path)
-	if !strings.Contains(got, "不否定已有 iCloud 激活状态") || !strings.Contains(got, "请勿反复重连") {
-		t.Fatalf("unexpected message %q", got)
-	}
-	if strings.Contains(got, "-20755") || strings.Contains(got, "not active") {
-		t.Fatalf("raw or misleading diagnostic leaked in %q", got)
-	}
-}
-
 func TestLastProcessErrorMapsSMSRateLimitWithoutExposingLog(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "worker.err")
 	line := "trusted-device: gsa: fetch boot_args page: status 423; ec=-22981; tooManyCodesSent=true; noTrustedDevices=true"

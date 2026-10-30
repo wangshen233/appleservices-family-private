@@ -17,15 +17,10 @@ import (
 
 var errVerificationRequired = errors.New("account verification is required; complete it in the dashboard")
 
-func shouldResumeActivatedSession(loginErr error) bool {
-	var authErr *gsa.AuthenticationError
-	return errors.As(loginErr, &authErr) && authErr.Operation == "init" && authErr.Code == -20755
-}
-
 func deviceListFailure(err error) control.Result {
 	var requestErr *gsa.DeviceRequestError
 	if errors.Is(err, appleservices.ErrDeviceIdentityRefreshRequired) || errors.As(err, &requestErr) && requestErr.HTTPStatus == 401 {
-		return control.Result{Stage: "device_identity_refresh_required", Message: "iCloud 已激活会话仍在线，但 Apple 已拒绝当前设备管理身份。可尝试一次带密码重连；若新登录初始化也被 Apple 拒绝，请停止重试，后台会继续使用已保存的激活会话"}
+		return control.Result{Stage: "device_identity_refresh_required", Message: "设备管理登录态需要补齐：请重新连接此账号一次。成功后会保存该凭据，后续重启不再重复输入密码"}
 	}
 	return control.Result{Stage: "device_query_failed", Message: "设备列表获取失败，请稍后重试"}
 }

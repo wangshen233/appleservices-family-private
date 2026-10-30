@@ -97,21 +97,6 @@ func TestDeviceListFailureExplainsIdentityRefresh(t *testing.T) {
 	}
 }
 
-func TestInactiveInitCanFallBackOnlyToBoundActivatedSession(t *testing.T) {
-	if !shouldResumeActivatedSession(&gsa.AuthenticationError{Operation: "init", Code: -20755}) {
-		t.Fatal("Apple inactive-init response did not permit an activated-session fallback")
-	}
-	for _, err := range []error{
-		&gsa.AuthenticationError{Operation: "complete", Code: -20755},
-		&gsa.AuthenticationError{Operation: "init", Code: -22406},
-		errors.New("network unavailable"),
-	} {
-		if shouldResumeActivatedSession(err) {
-			t.Fatalf("unrelated login failure permitted activated-session fallback: %v", err)
-		}
-	}
-}
-
 func TestReservedAliasPresentRequiresOneExactActiveMatch(t *testing.T) {
 	alias := icloud.HideMyEmailAlias{Email: "Candidate@icloud.com", Label: "shop", Note: "order", Active: true}
 	if !reservedAliasPresent(&icloud.HideMyEmailInfo{Aliases: []icloud.HideMyEmailAlias{alias}}, "candidate@icloud.com", "shop", "order") {
