@@ -26,6 +26,15 @@ func TestAccountAuthCapturesOAuthGrantCode(t *testing.T) {
 	}
 }
 
+func TestPortalGrantValidationRequiresBusinessSuccess(t *testing.T) {
+	if portalGrantValidationSucceeded([]byte(`<script id="grant_code_args">{"message":{"event":"WidgetBridgeFailed"}}</script>`)) {
+		t.Fatal("OAuth business failure was accepted")
+	}
+	if !portalGrantValidationSucceeded([]byte(`<script id="grant_code_args">{"message":{"event":"WidgetBridgeComplete"}}</script>`)) {
+		t.Fatal("OAuth business success was not accepted")
+	}
+}
+
 func TestReachableEmailChallengeBindsAddressAndVerifiesReadback(t *testing.T) {
 	const address = "forward@example.test"
 	verified := false

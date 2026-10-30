@@ -231,15 +231,20 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 	if state.grantCode == "" {
 		return errors.New("Apple Account OAuth grant code was unavailable")
 	}
+	grantCode := state.grantCode
+	if decoded, decodeErr := base64.StdEncoding.DecodeString(grantCode); decodeErr == nil && len(decoded) > 0 {
+		grantCode = string(decoded)
+	}
 	c.lastStage = "oauth-validate"
 	validateQuery := url.Values{
 		"frame_id": {frame}, "iframeId": {frame}, "client_id": {state.clientID},
 		"redirect_uri": {"https://account.apple.com"}, "response_type": {"code"},
-		"response_mode": {"web_message"}, "state": {frame}, "code": {state.grantCode},
+		"response_mode": {"web_message"}, "state": {frame}, "code": {grantCode},
 		"authVersion": {"8.0.2"},
 	}
-	response, _, err = c.authRequest(ctx, state, http.MethodGet, authBase+"/authorize/validate?"+validateQuery.Encode(), nil, c.authHeaders(state))
-	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+	response, validateData, err := c.authRequest(ctx, state, http.MethodGet, authBase+"/authorize/validate?"+validateQuery.Encode(), nil, c.authHeaders(state))
+	grantCode = ""
+	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 || !portalGrantValidationSucceeded(validateData) {
 		return errors.New("Apple Account OAuth grant validation failed")
 	}
 	c.apiBase = strings.TrimRight(bootstrap.APIURL, "/")
@@ -267,6 +272,25 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 
 func (c *AppleAccountClient) AuthenticationFailure() (string, int) {
 	return c.lastStage, c.lastHTTP
+}
+
+func portalGrantValidationSucceeded(data []byte) bool {
+	marker := []byte(`id="grant_code_args">`)
+	start := bytes.Index(data, marker)
+	if start < 0 {
+		return false
+	}
+	start += len(marker)
+	end := bytes.Index(data[start:], []byte(`</script>`))
+	if end < 0 {
+		return false
+	}
+	var result struct {
+		Message struct {
+			Event string `json:"event"`
+		} `json:"message"`
+	}
+	return json.Unmarshal(bytes.TrimSpace(data[start:start+end]), &result) == nil && result.Message.Event == "WidgetBridgeComplete"
 }
 
 func (c *AppleAccountClient) portalRequest(ctx context.Context, method, path string, payload any, requireAPIKey bool) ([]byte, int, error) {
