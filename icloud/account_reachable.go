@@ -231,20 +231,27 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 	if state.grantCode == "" {
 		return errors.New("Apple Account OAuth grant code was unavailable")
 	}
-	grantCode := state.grantCode
-	if decoded, decodeErr := base64.StdEncoding.DecodeString(grantCode); decodeErr == nil && len(decoded) > 0 {
-		grantCode = string(decoded)
-	}
 	c.lastStage = "oauth-validate"
-	validateQuery := url.Values{
-		"frame_id": {frame}, "iframeId": {frame}, "client_id": {state.clientID},
-		"redirect_uri": {"https://account.apple.com"}, "response_type": {"code"},
-		"response_mode": {"web_message"}, "state": {frame}, "code": {grantCode},
-		"authVersion": {"8.0.2"},
+	grantCodes := []string{state.grantCode}
+	if decoded, decodeErr := base64.StdEncoding.DecodeString(state.grantCode); decodeErr == nil && len(decoded) > 0 && string(decoded) != state.grantCode {
+		grantCodes = append([]string{string(decoded)}, grantCodes...)
 	}
-	response, validateData, err := c.authRequest(ctx, state, http.MethodGet, authBase+"/authorize/validate?"+validateQuery.Encode(), nil, c.authHeaders(state))
-	grantCode = ""
-	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 || !portalGrantValidationSucceeded(validateData) {
+	validated := false
+	for _, grantCode := range grantCodes {
+		validateQuery := url.Values{
+			"frame_id": {frame}, "iframeId": {frame}, "client_id": {state.clientID},
+			"redirect_uri": {"https://account.apple.com"}, "response_type": {"code"},
+			"response_mode": {"web_message"}, "state": {frame}, "code": {grantCode},
+			"authVersion": {"8.0.2"},
+		}
+		response, validateData, validateErr := c.authRequest(ctx, state, http.MethodGet, authBase+"/authorize/validate?"+validateQuery.Encode(), nil, c.authHeaders(state))
+		if validateErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 && portalGrantValidationSucceeded(validateData) {
+			validated = true
+			break
+		}
+	}
+	state.grantCode = ""
+	if !validated {
 		return errors.New("Apple Account OAuth grant validation failed")
 	}
 	c.apiBase = strings.TrimRight(bootstrap.APIURL, "/")

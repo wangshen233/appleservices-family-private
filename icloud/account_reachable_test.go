@@ -2,6 +2,7 @@ package icloud
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,18 @@ func TestPortalGrantValidationRequiresBusinessSuccess(t *testing.T) {
 	}
 	if !portalGrantValidationSucceeded([]byte(`<script id="grant_code_args">{"message":{"event":"WidgetBridgeComplete"}}</script>`)) {
 		t.Fatal("OAuth business success was not accepted")
+	}
+}
+
+func TestGrantCodeCandidatesPreferDecodedThenRetainRawFallback(t *testing.T) {
+	raw := "plain-grant-code"
+	encoded := base64.StdEncoding.EncodeToString([]byte(raw))
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || string(decoded) != raw {
+		t.Fatal("grant code candidate setup failed")
+	}
+	if encoded == raw {
+		t.Fatal("encoded grant code unexpectedly matched raw value")
 	}
 }
 
