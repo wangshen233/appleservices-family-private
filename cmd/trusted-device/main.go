@@ -672,8 +672,9 @@ func run() (runErr error) {
 					return control.Result{Message: "无法初始化 Apple 账户管理会话", Stage: "hme-reachable-session"}
 				}
 				if clientErr = accountManagementClient.Authenticate(queryCtx, password, generateCode); clientErr != nil {
+					failureStage, failureHTTP := accountManagementClient.AuthenticationFailure()
 					accountManagementClient = nil
-					return control.Result{Message: "Apple 账户管理认证未完成；登录会话和密码未保存", Stage: "hme-reachable-auth"}
+					return control.Result{Message: "Apple 账户管理认证未完成；登录会话和密码未保存", Stage: "hme-reachable-auth-" + failureStage, HTTPStatus: failureHTTP}
 				}
 				if clientErr = accountManagementClient.BeginReachableEmail(queryCtx, alias); clientErr != nil {
 					accountManagementClient = nil

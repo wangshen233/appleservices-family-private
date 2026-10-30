@@ -30,6 +30,8 @@ type AppleAccountClient struct {
 	apiKey        string
 	pendingEmail  string
 	pendingVerify json.RawMessage
+	lastStage     string
+	lastHTTP      int
 }
 
 type portalBootstrap struct {
@@ -96,6 +98,7 @@ func (c *AppleAccountClient) authRequest(ctx context.Context, state *hmeAuthStat
 	if err != nil {
 		return nil, nil, err
 	}
+	c.lastHTTP = response.StatusCode
 	for name, target := range map[string]*string{
 		"X-Apple-Auth-Attributes": &state.authAttributes, "X-Apple-ID-Session-Id": &state.sessionID,
 		"scnt": &state.scnt, "X-Apple-Session-Token": &state.sessionToken,
@@ -117,6 +120,7 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 	if password == "" {
 		return ErrAccountManagementAuthenticationRequired
 	}
+	c.lastStage, c.lastHTTP = "bootstrap", 0
 	bootstrapRequest, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://appleid.apple.com/bootstrap/portal", nil)
 	bootstrapRequest.Header.Set("Accept", "application/json")
 	bootstrapRequest.Header.Set("User-Agent", hmeWebUserAgent)
@@ -125,6 +129,7 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 		return errors.New("Apple Account bootstrap failed")
 	}
 	bootstrapData, readErr := io.ReadAll(io.LimitReader(bootstrapResponse.Body, (1<<20)+1))
+	c.lastHTTP = bootstrapResponse.StatusCode
 	bootstrapResponse.Body.Close()
 	var bootstrap portalBootstrap
 	if readErr != nil || bootstrapResponse.StatusCode != http.StatusOK || json.Unmarshal(bootstrapData, &bootstrap) != nil || bootstrap.ServiceKey == "" || bootstrap.ServiceURL == "" || bootstrap.APIURL == "" {
@@ -137,11 +142,13 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 	startHeaders := make(http.Header)
 	startHeaders.Set("Accept", "*/*")
 	startHeaders.Set("User-Agent", hmeWebUserAgent)
+	c.lastStage = "authorize"
 	response, _, err := c.authRequest(ctx, state, http.MethodGet, authBase+"/authorize/signin?"+query.Encode(), nil, startHeaders)
 	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return errors.New("Apple Account authentication could not be initialized")
 	}
 	federateBody, _ := json.Marshal(map[string]any{"accountName": c.appleID, "rememberMe": false})
+	c.lastStage = "federate"
 	response, _, err = c.authRequest(ctx, state, http.MethodPost, authBase+"/federate?isRememberMeEnabled=false", federateBody, c.authHeaders(state))
 	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return errors.New("Apple Account federation failed")
@@ -149,6 +156,7 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 	params := srp.NewParams()
 	srpClient := srp.NewClient(params, c.appleID)
 	initBody, _ := json.Marshal(map[string]any{"a": base64.StdEncoding.EncodeToString(srpClient.PublicA().Bytes()), "accountName": c.appleID, "protocols": []string{"s2k", "s2k_fo"}})
+	c.lastStage = "srp-init"
 	response, initData, err := c.authRequest(ctx, state, http.MethodPost, authBase+"/signin/init", initBody, c.authHeaders(state))
 	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return errors.New("Apple Account SRP challenge failed")
@@ -181,6 +189,7 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 		return proofErr
 	}
 	completeBody, _ := json.Marshal(map[string]any{"accountName": c.appleID, "rememberMe": false, "trustTokens": []string{}, "m1": base64.StdEncoding.EncodeToString(m1), "c": state.srpSession, "m2": base64.StdEncoding.EncodeToString(m2)})
+	c.lastStage = "srp-complete"
 	response, _, err = c.authRequest(ctx, state, http.MethodPost, authBase+"/signin/complete?isRememberMeEnabled=false", completeBody, c.authHeaders(state))
 	if err != nil {
 		return err
@@ -189,6 +198,7 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 		if codeProvider == nil {
 			return ErrAccountManagementAuthenticationRequired
 		}
+		c.lastStage = "trusted-challenge"
 		response, _, err = c.authRequest(ctx, state, http.MethodPut, authBase+"/verify/trusteddevice/securitycode", nil, c.authHeaders(state))
 		if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 			return errors.New("Apple Account trusted-device challenge failed")
@@ -200,6 +210,7 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 			return errors.New("local trusted-device code generation failed")
 		}
 		verifyBody, _ := json.Marshal(map[string]any{"securityCode": map[string]string{"code": strings.TrimSpace(code)}})
+		c.lastStage = "trusted-code"
 		response, verifyData, err := c.authRequest(ctx, state, http.MethodPost, authBase+"/verify/trusteddevice/securitycode", verifyBody, c.authHeaders(state))
 		for index := range verifyBody {
 			verifyBody[index] = 0
@@ -211,15 +222,20 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 	} else if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return errors.New("Apple Account credentials were rejected")
 	}
+	c.lastStage = "trust-session"
 	response, _, err = c.authRequest(ctx, state, http.MethodGet, authBase+"/2sv/trust", nil, c.authHeaders(state))
 	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return errors.New("Apple Account web session trust failed")
 	}
 	c.apiBase = strings.TrimRight(bootstrap.APIURL, "/")
-	if _, _, err := c.portalRequest(ctx, http.MethodGet, "/account/manage/gs/ws/token", nil, false); err != nil {
+	c.lastStage = "portal-token"
+	if _, status, err := c.portalRequest(ctx, http.MethodGet, "/account/manage/gs/ws/token", nil, false); err != nil {
+		c.lastHTTP = status
 		return errors.New("Apple Account management session was not established")
 	}
-	data, _, err := c.portalRequest(ctx, http.MethodGet, "/account/manage", nil, false)
+	c.lastStage = "manage-data"
+	data, status, err := c.portalRequest(ctx, http.MethodGet, "/account/manage", nil, false)
+	c.lastHTTP = status
 	if err != nil {
 		return errors.New("Apple Account management data was unavailable")
 	}
@@ -230,7 +246,12 @@ func (c *AppleAccountClient) Authenticate(ctx context.Context, password string, 
 		return errors.New("Apple Account management API key was unavailable")
 	}
 	c.apiKey = manage.APIKey
+	c.lastStage, c.lastHTTP = "", 0
 	return nil
+}
+
+func (c *AppleAccountClient) AuthenticationFailure() (string, int) {
+	return c.lastStage, c.lastHTTP
 }
 
 func (c *AppleAccountClient) portalRequest(ctx context.Context, method, path string, payload any, requireAPIKey bool) ([]byte, int, error) {
@@ -265,6 +286,7 @@ func (c *AppleAccountClient) portalRequest(ctx context.Context, method, path str
 		return nil, 0, err
 	}
 	defer response.Body.Close()
+	c.lastHTTP = response.StatusCode
 	data, readErr := io.ReadAll(io.LimitReader(response.Body, (4<<20)+1))
 	if readErr != nil || len(data) > 4<<20 {
 		return nil, response.StatusCode, errors.New("Apple Account response was invalid")
